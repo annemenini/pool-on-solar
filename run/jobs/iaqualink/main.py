@@ -19,8 +19,9 @@ import random
 import sys
 import time
 
+import iaqualink
+from iaqualink.client import AqualinkClient
 import asyncio
-from iaqualink import AqualinkClient
 
 # [START cloudrun_jobs_env_vars]
 # Retrieve Job-defined env vars
