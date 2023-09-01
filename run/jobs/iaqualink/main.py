@@ -19,6 +19,7 @@ import random
 import sys
 import time
 
+import asyncio
 from iaqualink import AqualinkClient
 
 # [START cloudrun_jobs_env_vars]
@@ -32,7 +33,7 @@ IAQUALINK_PASSWORD = os.getenv("IAQUALINK_PASSWORD", 0)
 
 
 # Define main script
-def main(user_id: str, password: str):
+async def main(user_id: str, password: str):
     """Program that print status of iAquaLink device."""
     print(f"Starting Task #{TASK_INDEX}, Attempt #{TASK_ATTEMPT}...")
     async with AqualinkClient(user_id, password) as c:
@@ -47,7 +48,7 @@ def main(user_id: str, password: str):
 # Start script
 if __name__ == "__main__":
     try:
-        main(IAQUALINK_USER_ID, IAQUALINK_PASSWORD)
+        asyncio.run(main(IAQUALINK_USER_ID, IAQUALINK_PASSWORD))
     except Exception as err:
         message = (
             f"Task #{TASK_INDEX}, " + f"Attempt #{TASK_ATTEMPT} failed: {str(err)}"
