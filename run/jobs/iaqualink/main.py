@@ -42,7 +42,10 @@ async def main(user_id: str, password: str):
         print(s)
         d = await list(s.values())[0].get_devices()
         print(d)
-        await d['pool_pump']. turn_on()
+        # Turn on Filter pump
+        # await d['pool_pump'].turn_on()
+        # Rest Thermostat pool
+        await d['pool_set_point'].set_temperature(30)
         d = await list(s.values())[0].get_devices()
         print(d)
 
