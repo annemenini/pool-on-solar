@@ -19,35 +19,54 @@ import random
 import sys
 import time
 
+import asyncio
+
 import iaqualink
 from iaqualink.client import AqualinkClient
-import asyncio
+from tesla_api import TeslaApiClient
 
 # [START cloudrun_jobs_env_vars]
 # Retrieve Job-defined env vars
 TASK_INDEX = os.getenv("CLOUD_RUN_TASK_INDEX", 0)
 TASK_ATTEMPT = os.getenv("CLOUD_RUN_TASK_ATTEMPT", 0)
 # Retrieve User-defined env vars
+TESLA_USER_ID = os.getenv("TESLA_USER_ID", 0)
+TESLA_PASSWORD = os.getenv("TESLA_PASSWORD", 0)
 IAQUALINK_USER_ID = os.getenv("IAQUALINK_USER_ID", 0)
 IAQUALINK_PASSWORD = os.getenv("IAQUALINK_PASSWORD", 0)
 # [END cloudrun_jobs_env_vars]
 
 
-# Define main script
-async def main(user_id: str, password: str):
-    """Program that print status of iAquaLink device."""
-    print(f"Starting Task #{TASK_INDEX}, Attempt #{TASK_ATTEMPT}...")
-    async with AqualinkClient(user_id, password) as c:
-        s = await c.get_systems()
-        print(s)
-        d = await list(s.values())[0].get_devices()
-        print(d)
+# Define Tesla script
+async def main_tesla(user_id: str, password: str):
+    """Program that log, print status of Tesla energy system."""
+    async with TeslaApiClient(user_id, password) as client:
+        energy_sites = await client.list_energy_sites()
+        print(energy_sites)
+
+
+# Define iAquaLink script
+async def main_iaqualink(user_id: str, password: str):
+    """Program that log, print status and set pool temperature target of iAquaLink device."""
+    async with AqualinkClient(user_id, password) as client:
+        systems = await client.get_systems()
+        print(systems)
+        devices = await list(systems.values())[0].get_devices()
+        print(devices)
         # Turn on Filter pump
-        # await d['pool_pump'].turn_on()
+        # await devices['pool_pump'].turn_on()
         # Rest Thermostat pool
-        await d['pool_set_point'].set_temperature(30)
-        d = await list(s.values())[0].get_devices()
-        print(d)
+        await devices['pool_set_point'].set_temperature(30)
+        devices = await list(systems.values())[0].get_devices()
+        print(devices)
+
+
+# Define main script
+async def main(tesla_user_id: str, tesla_password: str, iaqualink_user_id: str, iaqualink_password: str):
+    """Log, print status and reset tesla and iAquaLink devices."""
+    print(f"Starting Task #{TASK_INDEX}, Attempt #{TASK_ATTEMPT}...")
+    await main_tesla(tesla_user_id, tesla_password)
+    await main_iaqualink(iaqualink_user_id, iaqualink_password)
 
     print(f"Completed Task #{TASK_INDEX}.")
 
@@ -55,7 +74,7 @@ async def main(user_id: str, password: str):
 # Start script
 if __name__ == "__main__":
     try:
-        asyncio.run(main(IAQUALINK_USER_ID, IAQUALINK_PASSWORD))
+        asyncio.run(main(TESLA_USER_ID, TESLA_PASSWORD, IAQUALINK_USER_ID, IAQUALINK_PASSWORD))
     except Exception as err:
         message = (
             f"Task #{TASK_INDEX}, " + f"Attempt #{TASK_ATTEMPT} failed: {str(err)}"
