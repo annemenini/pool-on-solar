@@ -42,6 +42,9 @@ async def main(user_id: str, password: str):
         print(s)
         d = await list(s.values())[0].get_devices()
         print(d)
+        await d['pool_pump']. turn_on()
+        d = await list(s.values())[0].get_devices()
+        print(d)
 
     print(f"Completed Task #{TASK_INDEX}.")
 
