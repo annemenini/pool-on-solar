@@ -40,10 +40,10 @@ IAQUALINK_PASSWORD = os.getenv("IAQUALINK_PASSWORD", 0)
 # Define Tesla script
 async def main_tesla(user_id: str, password: str):
     """Program that log, print status of Tesla energy system."""
-    with TeslaApiClient(user_id, password) as client:
-        energy_sites = await client.list_energy_sites()
-        print(energy_sites)
-        await client.close()
+    client = TeslaApiClient(user_id, password)
+    energy_sites = await client.list_energy_sites()
+    print(energy_sites)
+    await client.close()
 
 
 # Define iAquaLink script
