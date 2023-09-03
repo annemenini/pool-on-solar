@@ -23,7 +23,8 @@ import asyncio
 
 import iaqualink
 from iaqualink.client import AqualinkClient
-from tesla_api import TeslaApiClient
+import teslapy
+
 
 # [START cloudrun_jobs_env_vars]
 # Retrieve Job-defined env vars
@@ -40,10 +41,14 @@ IAQUALINK_PASSWORD = os.getenv("IAQUALINK_PASSWORD", 0)
 # Define Tesla script
 async def main_tesla(user_id: str, password: str):
     """Program that log, print status of Tesla energy system."""
-    client = TeslaApiClient(user_id, password)
-    energy_sites = await client.list_energy_sites()
-    print(energy_sites)
-    await client.close()
+    tesla = teslapy.Tesla(user_id)
+    if not tesla.authorized:
+        print('Use browser to login. Page Not Found will be shown at success.')
+        print('Open this URL: ' + tesla.authorization_url())
+        tesla.fetch_token(authorization_response=input('Enter URL after authentication: '))
+    vehicles = tesla.vehicle_list()
+    print(vehicles[0])
+    tesla.close()
 
 
 # Define iAquaLink script
