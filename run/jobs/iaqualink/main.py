@@ -38,14 +38,18 @@ IAQUALINK_PASSWORD = os.getenv("IAQUALINK_PASSWORD", 0)
 # [END cloudrun_jobs_env_vars]
 
 
-# Define Tesla script
-async def main_tesla(user_id: str, password: str):
-    """Program that log, print status of Tesla energy system."""
+def genera_tesla_authentication_teslapy_cache_json(user_id: str):
+    """Generate the TeslaPy Cache json required for authentication."""
     tesla = teslapy.Tesla(user_id)
     if not tesla.authorized:
         print('Use browser to login. Page Not Found will be shown at success.')
         print('Open this URL: ' + tesla.authorization_url())
         tesla.fetch_token(authorization_response=input('Enter URL after authentication: '))
+    tesla.close()
+
+
+def test_tesla_authentication(user_id: str, cache_file: str):
+    tesla = teslapy.Tesla(user_id, cache_file=cache_file)
     vehicles = tesla.vehicle_list()
     print(vehicles[0])
     tesla.close()
@@ -68,10 +72,11 @@ async def main_iaqualink(user_id: str, password: str):
 
 
 # Define main script
-async def main(tesla_user_id: str, tesla_password: str, iaqualink_user_id: str, iaqualink_password: str):
+async def main(tesla_user_id: str, teslapy_cache_file: str, iaqualink_user_id: str, iaqualink_password: str):
     """Log, print status and reset tesla and iAquaLink devices."""
     print(f"Starting Task #{TASK_INDEX}, Attempt #{TASK_ATTEMPT}...")
-    await main_tesla(tesla_user_id, tesla_password)
+    # genera_tesla_authentication_teslapy_cache_json(tesla_user_id)
+    test_tesla_authentication(tesla_user_id, teslapy_cache_file)
     await main_iaqualink(iaqualink_user_id, iaqualink_password)
 
     print(f"Completed Task #{TASK_INDEX}.")
@@ -80,7 +85,7 @@ async def main(tesla_user_id: str, tesla_password: str, iaqualink_user_id: str, 
 # Start script
 if __name__ == "__main__":
     try:
-        asyncio.run(main(TESLA_USER_ID, TESLA_PASSWORD, IAQUALINK_USER_ID, IAQUALINK_PASSWORD))
+        asyncio.run(main(TESLA_USER_ID, TESLAPY_CACHE_FILE, IAQUALINK_USER_ID, IAQUALINK_PASSWORD))
     except Exception as err:
         message = (
             f"Task #{TASK_INDEX}, " + f"Attempt #{TASK_ATTEMPT} failed: {str(err)}"
