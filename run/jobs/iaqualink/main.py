@@ -32,7 +32,7 @@ TASK_INDEX = os.getenv("CLOUD_RUN_TASK_INDEX", 0)
 TASK_ATTEMPT = os.getenv("CLOUD_RUN_TASK_ATTEMPT", 0)
 # Retrieve User-defined env vars
 TESLA_USER_ID = os.getenv("TESLA_USER_ID", 0)
-TESLA_PASSWORD = os.getenv("TESLA_PASSWORD", 0)
+TESLAPY_CACHE_FILE = os.getenv("TESLAPY_CACHE_FILE", 0)
 IAQUALINK_USER_ID = os.getenv("IAQUALINK_USER_ID", 0)
 IAQUALINK_PASSWORD = os.getenv("IAQUALINK_PASSWORD", 0)
 # [END cloudrun_jobs_env_vars]
