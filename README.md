@@ -4,8 +4,8 @@ Automate the activation / deactivation of the pool cleaning system so that it on
 
 Requirements:
 
-* [Tesla Energy system](https://www.tesla.com/energy) (for )solar and powerwall)
-* [Jandy iAquaLink](https://www.jandy.com/en/products/controls/system-components/interfaces/iaqualink) (pool pump control)
+* [Tesla Energy system](https://www.tesla.com/energy) (solar panels, and optionally powerwall)
+* [Jandy iAquaLink](https://www.jandy.com/en/products/controls/system-components/interfaces/iaqualink) (pool pump controls)
 
 ## Configuration
 
