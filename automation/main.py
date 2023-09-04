@@ -37,29 +37,24 @@ def get_excess_power(user_id: str, cache_file: str) -> int:
 # Define iAquaLink script
 async def update_pool(user_id: str, password: str, excess_power: int) -> None:
     """Program that log, print status and set pool temperature target of iAquaLink device."""
-    print(f'######### TEST0 {user_id}, {password}')
     async with AqualinkClient(user_id, password) as client:
-        print('######### TEST1')
         systems = await client.get_systems()
-        print('######### TEST2')
-        print(systems)
         devices = await list(systems.values())[0].get_devices()
-        print(devices)
 
         if excess_power < 0:
-            if devices['aux_1'].is_on():  # Cleaner is ON
+            if devices['aux_1'].is_on:  # Cleaner is ON
                 # await devices['aux_1'].turn_off()
                 print('Turning Cleaner OFF')
-            elif devices['pool_pump'].is_on():  # Filter pump is ON & Cleaner is OFF
+            elif devices['pool_pump'].is_on:  # Filter pump is ON & Cleaner is OFF
                 # await devices['pool_pump'].turn_off()
                 print('Turning Filter Pump OFF')
             else:
                 print('Nothing to turn OFF')
         if excess_power > 1500:            
-            if not devices['pool_pump'].is_on():
+            if not devices['pool_pump'].is_on:
                 # await devices['pool_pump'].turn_on()
                 print('Turning Filter Pump ON')
-            elif devices['pool_pump'].is_on() and not devices['aux_1'].is_on(): 
+            elif devices['pool_pump'].is_on and not devices['aux_1'].is_on: 
                 # await devices['aux_1'].turn_on()
                 print('Turning Cleaner ON')
             else:
