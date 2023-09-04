@@ -1,0 +1,13 @@
+steps:
+# Build the container image
+- name: 'gcr.io/cloud-builders/docker'
+  args: ['build', '-t', 'us-west1-docker.pkg.dev/$PROJECT_ID/pool-on-solar/pool-on-solar:latest', '.']
+# Push the container image to Container Registry
+- name: 'gcr.io/cloud-builders/docker'
+  args: ['push', 'us-west1-docker.pkg.dev/$PROJECT_ID/pool-on-solar/pool-on-solar:latest']
+# Deploy container image to Cloud Run
+- name: 'gcr.io/google.com/cloudsdktool/cloud-sdk'
+  entrypoint: gcloud
+  args: ['run', 'jobs', 'deploy', 'pool-on-solar', '--image', 'us-west1-docker.pkg.dev/$PROJECT_ID/pool-on-solar/pool-on-solar:latest', '--region', 'us-west1']
+images:
+- us-west1-docker.pkg.dev/$PROJECT_ID/pool-on-solar/pool-on-solar:latest
