@@ -1,12 +1,17 @@
+import datetime
 import json
 import os
 import sys
+from typing import Any, Dict
 
 import asyncio
 
 import iaqualink
 from iaqualink.client import AqualinkClient
+from iaqualink.device import AqualinkDevice
+import pytz
 import teslapy
+from suntime import Sun
 
 # [START cloudrun_jobs_env_vars]
 # Retrieve Job-defined env vars
@@ -20,7 +25,7 @@ IAQUALINK_PASSWORD = os.getenv("IAQUALINK_PASSWORD", 0)
 # [END cloudrun_jobs_env_vars]
 
 
-def get_excess_power(user_id: str, cache_file: str) -> int:
+def get_enery_system_status(user_id: str, cache_file: str) -> Dict[str, Any]:
     tesla = teslapy.Tesla(user_id, cache_file=cache_file)
     products =  tesla.api('PRODUCT_LIST')['response']  
     energy_site_id = [p.get('energy_site_id') for p in products if p.get('resource_type') == 'battery'][0]
@@ -29,47 +34,87 @@ def get_excess_power(user_id: str, cache_file: str) -> int:
     solar_power = data.get('solar_power')
     load_power = data.get('load_power')
     excess_power = solar_power - load_power
-    print(f"Excess power: {solar_power} - {load_power} = {excess_power}")
+    battery_percentage = data.get('percentage_charged')
+    print(f"Excess power: {solar_power} - {load_power} = {excess_power}, battery percentage: {battery_percentage}")
     tesla.close()
-    return excess_power
+    return {'excess_power': excess_power, 'battery_percentage': battery_percentage}
+
+
+async def try_switch_device(device: AqualinkDevice, mode: str) -> bool:
+    if mode == 'off' and device.is_on:
+        await device.turn_off()
+        print(f'Turning {device.label} OFF')
+        return True
+    elif mode == 'on' and not device.is_on:
+        await device.turn_on()
+        print(f'Turning {device.label} ON')
+        return True
+    return False
 
 
 # Define iAquaLink script
-async def update_pool(user_id: str, password: str, excess_power: int) -> None:
+async def update_pool(devices: Dict[str, AqualinkDevice], excess_power: int) -> None:
     """Program that log, print status and set pool temperature target of iAquaLink device."""
+    if excess_power < 0:
+        is_consumption_reduced = (await try_switch_device(devices['aux_1'], 'off')) or (await try_switch_device(devices['pool_pump'], 'off'))
+        if not is_consumption_reduced:
+            print('Pool System: Nothing to turn OFF')
+    elif excess_power < 1500:  
+        print('Pool System: Standby')
+    else:       
+        is_consumption_increased = (await try_switch_device(devices['pool_pump'], 'on')) or (await try_switch_device(devices['aux_1'], 'on'))
+        if not is_consumption_increased:
+            print('Pool System: Nothing to turn ON')
+
+
+def convert_to_local_time(time: datetime.datetime) -> datetime.datetime:
+    local_time_zone = pytz.timezone('US/Pacific')
+    return time.astimezone(local_time_zone)
+
+
+async def update_lights(devices: Dict[str, AqualinkDevice], battery_percentage: float) -> None:
+    # Mountain View, CA, United States
+    latitude = 37.3861
+    longitude = -122.0839
+
+    sun = Sun(latitude, longitude)
+
+    # Get today's sunrise and sunset in UTC
+    sunset_time = convert_to_local_time(sun.get_sunset_time())
+    turn_on_time = sunset_time
+    current_time = convert_to_local_time(datetime.datetime.now())
+    turn_off_time = current_time.replace(hour=22, minute=0)
+    # print(f'Current time: {current_time}, turn on time: {turn_on_time}, turn off time: {turn_off_time}')
+    if current_time.time() < turn_on_time.time() or current_time.time() > turn_off_time.time():
+        has_turned_some_lights_off = False
+        has_turned_some_lights_off &= await try_switch_device(devices['aux_B1'], 'off')
+        has_turned_some_lights_off &= await try_switch_device(devices['aux_B3'], 'off')
+        has_turned_some_lights_off &= await try_switch_device(devices['aux_B4'], 'off')
+        if has_turned_some_lights_off:
+            print('Turned some lights OFF')
+    elif battery_percentage > 50:
+        has_turned_some_lights_on = False
+        has_turned_some_lights_on &= await try_switch_device(devices['aux_B1'], 'on')
+        has_turned_some_lights_on &= await try_switch_device(devices['aux_B3'], 'on')
+        has_turned_some_lights_on &= await try_switch_device(devices['aux_B4'], 'on')
+        if has_turned_some_lights_on:
+            print('Turned some lights ON')
+
+
+async def control_iaqualink(user_id: str, password: str, enery_system_status: Dict[str, Any]) -> None:
     async with AqualinkClient(user_id, password) as client:
         systems = await client.get_systems()
         devices = await list(systems.values())[0].get_devices()
-
-        if excess_power < 0:
-            if devices['aux_1'].is_on:  # Cleaner is ON
-                await devices['aux_1'].turn_off()
-                print('Turning Cleaner OFF')
-            elif devices['pool_pump'].is_on:  # Filter pump is ON & Cleaner is OFF
-                await devices['pool_pump'].turn_off()
-                print('Turning Filter Pump OFF')
-            else:
-                print('Nothing to turn OFF')
-        elif excess_power < 1500:  
-            print('System Standby')
-        else:            
-            if not devices['pool_pump'].is_on:
-                await devices['pool_pump'].turn_on()
-                print('Turning Filter Pump ON')
-            elif devices['pool_pump'].is_on and not devices['aux_1'].is_on: 
-                await devices['aux_1'].turn_on()
-                print('Turning Cleaner ON')
-            else:
-                print('Nothing to turn ON')
+        await update_pool(devices, enery_system_status['excess_power'])
+        await update_lights(devices, enery_system_status['battery_percentage'])
         
 
 # Define main script
 async def main(tesla_user_id: str, teslapy_cache_file: str, iaqualink_user_id: str, iaqualink_password: str):
     """Log, print status and reset tesla and iAquaLink devices."""
     print(f"Starting Task #{TASK_INDEX}, Attempt #{TASK_ATTEMPT}...")
-    excess_power = get_excess_power(tesla_user_id, teslapy_cache_file)
-    await update_pool(iaqualink_user_id, iaqualink_password, excess_power)
-
+    enery_system_status = get_enery_system_status(tesla_user_id, teslapy_cache_file)
+    await control_iaqualink(iaqualink_user_id, iaqualink_password, enery_system_status)
     print(f"Completed Task #{TASK_INDEX}.")
 
 
