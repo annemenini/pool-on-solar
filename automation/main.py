@@ -43,24 +43,25 @@ async def update_pool(user_id: str, password: str, excess_power: int) -> None:
 
         if excess_power < 0:
             if devices['aux_1'].is_on:  # Cleaner is ON
-                # await devices['aux_1'].turn_off()
+                await devices['aux_1'].turn_off()
                 print('Turning Cleaner OFF')
             elif devices['pool_pump'].is_on:  # Filter pump is ON & Cleaner is OFF
-                # await devices['pool_pump'].turn_off()
+                await devices['pool_pump'].turn_off()
                 print('Turning Filter Pump OFF')
             else:
                 print('Nothing to turn OFF')
-        if excess_power > 1500:            
+        elif excess_power < 1500:  
+            print('System Standby')
+        else:            
             if not devices['pool_pump'].is_on:
-                # await devices['pool_pump'].turn_on()
+                await devices['pool_pump'].turn_on()
                 print('Turning Filter Pump ON')
             elif devices['pool_pump'].is_on and not devices['aux_1'].is_on: 
-                # await devices['aux_1'].turn_on()
+                await devices['aux_1'].turn_on()
                 print('Turning Cleaner ON')
             else:
                 print('Nothing to turn ON')
         
-
 
 # Define main script
 async def main(tesla_user_id: str, teslapy_cache_file: str, iaqualink_user_id: str, iaqualink_password: str):
