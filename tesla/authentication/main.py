@@ -1,3 +1,7 @@
+import json
+import os
+import sys
+
 import teslapy
 
 # [START cloudrun_jobs_env_vars]

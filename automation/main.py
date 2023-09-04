@@ -1,3 +1,7 @@
+import json
+import os
+import sys
+
 import asyncio
 
 import iaqualink
@@ -16,35 +20,59 @@ IAQUALINK_PASSWORD = os.getenv("IAQUALINK_PASSWORD", 0)
 # [END cloudrun_jobs_env_vars]
 
 
-def tesla_live_status(user_id: str, cache_file: str):
+def get_excess_power(user_id: str, cache_file: str) -> int:
     tesla = teslapy.Tesla(user_id, cache_file=cache_file)
-    data = tesla.api('SITE_DATA')['response']]
-    print(data)
+    products =  tesla.api('PRODUCT_LIST')['response']  
+    energy_site_id = [p.get('energy_site_id') for p in products if p.get('resource_type') == 'battery'][0]
+    data = tesla.api('SITE_DATA', {'site_id': energy_site_id})['response']
+    # print(data)
+    solar_power = data.get('solar_power')
+    load_power = data.get('load_power')
+    excess_power = solar_power - load_power
+    print(f"Excess power: {solar_power} - {load_power} = {excess_power}")
     tesla.close()
+    return excess_power
 
 
 # Define iAquaLink script
-async def main_iaqualink(user_id: str, password: str):
+async def update_pool(user_id: str, password: str, excess_power: int) -> None:
     """Program that log, print status and set pool temperature target of iAquaLink device."""
+    print(f'######### TEST0 {user_id}, {password}')
     async with AqualinkClient(user_id, password) as client:
+        print('######### TEST1')
         systems = await client.get_systems()
+        print('######### TEST2')
         print(systems)
         devices = await list(systems.values())[0].get_devices()
         print(devices)
-        # # Turn on Filter pump
-        # # await devices['pool_pump'].turn_on()
-        # # Rest Thermostat pool
-        # await devices['pool_set_point'].set_temperature(30)
-        # devices = await list(systems.values())[0].get_devices()
-        # print(devices)
+
+        if excess_power < 0:
+            if devices['aux_1'].is_on():  # Cleaner is ON
+                # await devices['aux_1'].turn_off()
+                print('Turning Cleaner OFF')
+            elif devices['pool_pump'].is_on():  # Filter pump is ON & Cleaner is OFF
+                # await devices['pool_pump'].turn_off()
+                print('Turning Filter Pump OFF')
+            else:
+                print('Nothing to turn OFF')
+        if excess_power > 1500:            
+            if not devices['pool_pump'].is_on():
+                # await devices['pool_pump'].turn_on()
+                print('Turning Filter Pump ON')
+            elif devices['pool_pump'].is_on() and not devices['aux_1'].is_on(): 
+                # await devices['aux_1'].turn_on()
+                print('Turning Cleaner ON')
+            else:
+                print('Nothing to turn ON')
+        
 
 
 # Define main script
 async def main(tesla_user_id: str, teslapy_cache_file: str, iaqualink_user_id: str, iaqualink_password: str):
     """Log, print status and reset tesla and iAquaLink devices."""
     print(f"Starting Task #{TASK_INDEX}, Attempt #{TASK_ATTEMPT}...")
-    test_tesla_authentication(tesla_user_id, teslapy_cache_file)
-    await main_iaqualink(iaqualink_user_id, iaqualink_password)
+    excess_power = get_excess_power(tesla_user_id, teslapy_cache_file)
+    await update_pool(iaqualink_user_id, iaqualink_password, excess_power)
 
     print(f"Completed Task #{TASK_INDEX}.")
 
