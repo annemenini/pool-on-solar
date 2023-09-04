@@ -1,5 +1,3 @@
-import json
-
 import teslapy
 
 # [START cloudrun_jobs_env_vars]
