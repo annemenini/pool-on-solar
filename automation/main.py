@@ -26,9 +26,10 @@ IAQUALINK_PASSWORD = os.getenv('IAQUALINK_PASSWORD', 0)
 # [END cloudrun_jobs_env_vars]
 
 _POOL_DEVICES = ['pool_pump', 'aux_1']  # By decreasing order of priority
-_POOL_EXCESS_POWER_REQUIRED = 1500  # Watt
-_POOL_BLACKOUT_WINDOW_START = 18  # Pool will be shut off in any case after 18h00
-_POOL_BLACKOUT_WINDOW_END = 8  # Pool will not turn on before 8h00
+_POOL_ACTIVATION_EXCESS_POWER = 2000  # Minimum excess power required to activate a pool device (in Watt)
+_POOL_DEACTIVATION_EXCESS_POWER = 500  # Excess power threshold below which pool devices start to be deactivated (in Watt)
+_POOL_OPERATION_WINDOW_START = 8  # Pool will be shut off in any case after 18h00
+_POOL_OPERATION_WINDOW_END = 18  # Pool will not turn on before 8h00
 _LIGHT_DEVICES = ['aux_B1', 'aux_B3', 'aux_B4']
 _LIGHT_MINIMUM_BATTERY_REQUIRED = 50  # %
 _LIGHT_BLACKOUT_WINDOW_START = 22  # Lights will be shut off in any case after 22h00
@@ -66,9 +67,24 @@ async def try_switch_device(device: AqualinkDevice, mode: str) -> bool:
     return False
 
 
+def convert_to_local_time(time: datetime.datetime) -> datetime.datetime:
+    local_time_zone = pytz.timezone(_TIME_ZONE)
+    return time.astimezone(local_time_zone)
+
+
+def is_pool_operable() -> None:
+    current_time = convert_to_local_time(datetime.datetime.now())
+    return current_time.hour >= _POOL_OPERATION_WINDOW_START and current_time.hour < _POOL_OPERATION_WINDOW_END
+
+
 async def update_pool(devices: Dict[str, AqualinkDevice], excess_power: int) -> None:
     """Program that log, print status and set pool temperature target of iAquaLink device."""
-    if excess_power < 0:
+    if not is_pool_operable():
+        for device_key in reversed(_POOL_DEVICES):
+            await try_switch_device(devices[device_key], 'off')
+        return
+    
+    if excess_power < _POOL_DEACTIVATION_EXCESS_POWER:
         is_consumption_reduced = False
         for device_key in reversed(_POOL_DEVICES):
             is_consumption_reduced = await try_switch_device(devices[device_key], 'off')
@@ -76,7 +92,7 @@ async def update_pool(devices: Dict[str, AqualinkDevice], excess_power: int) -> 
                 break
         if not is_consumption_reduced:
             print('Pool System: Nothing to turn OFF')
-    elif excess_power < _POOL_EXCESS_POWER_REQUIRED:  
+    elif excess_power < _POOL_ACTIVATION_EXCESS_POWER:  
         print('Pool System: Standby')
     else:       
         is_consumption_increased = False
@@ -86,11 +102,6 @@ async def update_pool(devices: Dict[str, AqualinkDevice], excess_power: int) -> 
                 break
         if not is_consumption_increased:
             print('Pool System: Nothing to turn ON')
-
-
-def convert_to_local_time(time: datetime.datetime) -> datetime.datetime:
-    local_time_zone = pytz.timezone(_TIME_ZONE)
-    return time.astimezone(local_time_zone)
 
 
 async def update_lights(devices: Dict[str, AqualinkDevice], battery_percentage: float) -> None:
@@ -103,17 +114,11 @@ async def update_lights(devices: Dict[str, AqualinkDevice], battery_percentage: 
     turn_off_time = current_time.replace(hour=_LIGHT_BLACKOUT_WINDOW_START, minute=0, second=0)
     # print(f'Current time: {current_time}, turn on time: {turn_on_time}, turn off time: {turn_off_time}')
     if current_time.time() < turn_on_time.time() or current_time.time() > turn_off_time.time():
-        has_turned_some_lights_off = False
         for light_key in _LIGHT_DEVICES:
-            has_turned_some_lights_off |= await try_switch_device(devices[light_key], 'off')
-        if has_turned_some_lights_off:
-            print('Turned some lights OFF')
+            await try_switch_device(devices[light_key], 'off')
     elif battery_percentage > _LIGHT_MINIMUM_BATTERY_REQUIRED:
-        has_turned_some_lights_on = False
         for light_key in _LIGHT_DEVICES:
-            has_turned_some_lights_on |= await try_switch_device(devices[light_key], 'on')
-        if has_turned_some_lights_on:
-            print('Turned some lights ON')
+            await try_switch_device(devices[light_key], 'on')
 
 
 async def control_iaqualink(user_id: str, password: str, energy_system_status: Dict[str, Any]) -> None:
