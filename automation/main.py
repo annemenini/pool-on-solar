@@ -2,7 +2,7 @@ import datetime
 import json
 import os
 import sys
-from typing import Any, Dict
+from typing import Any, Dict, Optional
 
 import asyncio
 
@@ -38,12 +38,11 @@ _LONGITUDE = -122.0839  # Mountain View, CA, United States Eastern Longitude
 _TIME_ZONE = 'US/Pacific'  # pytz time zone
 
 
-def get_energy_system_status(user_id: str, cache_file: str) -> Dict[str, Any]:
+def get_energy_site_status(user_id: str, cache_file: str) -> Dict[str, Any]:
     tesla = teslapy.Tesla(user_id, cache_file=cache_file)
     products =  tesla.api('PRODUCT_LIST')['response']  
     energy_site_id = [p.get('energy_site_id') for p in products if p.get('resource_type') == 'battery'][0]
     data = tesla.api('SITE_DATA', {'site_id': energy_site_id})['response']
-    # print(data)
     solar_power = data.get('solar_power')
     load_power = data.get('load_power')
     excess_power = solar_power - load_power
@@ -77,11 +76,14 @@ def is_pool_operable() -> None:
     return current_time.hour >= _POOL_OPERATION_WINDOW_START and current_time.hour < _POOL_OPERATION_WINDOW_END
 
 
-async def update_pool(devices: Dict[str, AqualinkDevice], excess_power: int) -> None:
+async def update_pool(devices: Dict[str, AqualinkDevice], excess_power: Optional[int]) -> None:
     """Program that log, print status and set pool temperature target of iAquaLink device."""
     if not is_pool_operable():
         for device_key in reversed(_POOL_DEVICES):
             await try_switch_device(devices[device_key], 'off')
+        return
+
+    if excess_power is None:
         return
     
     if excess_power < _POOL_DEACTIVATION_EXCESS_POWER:
@@ -112,7 +114,6 @@ async def update_lights(devices: Dict[str, AqualinkDevice], battery_percentage: 
     turn_on_time = sunset_time
     current_time = convert_to_local_time(datetime.datetime.now())
     turn_off_time = current_time.replace(hour=_LIGHT_BLACKOUT_WINDOW_START, minute=0, second=0)
-    # print(f'Current time: {current_time}, turn on time: {turn_on_time}, turn off time: {turn_off_time}')
     if current_time.time() < turn_on_time.time() or current_time.time() > turn_off_time.time():
         for light_key in _LIGHT_DEVICES:
             await try_switch_device(devices[light_key], 'off')
@@ -121,20 +122,27 @@ async def update_lights(devices: Dict[str, AqualinkDevice], battery_percentage: 
             await try_switch_device(devices[light_key], 'on')
 
 
-async def control_iaqualink(user_id: str, password: str, energy_system_status: Dict[str, Any]) -> None:
+async def control_iaqualink(user_id: str, password: str, energy_site_status: Optional[Dict[str, Any]]) -> None:
     async with AqualinkClient(user_id, password) as client:
         systems = await client.get_systems()
         devices = await list(systems.values())[0].get_devices()
-        await update_pool(devices, energy_system_status['excess_power'])
-        await update_lights(devices, energy_system_status['battery_percentage'])
+        excess_power = energy_site_status['excess_power'] if energy_site_status else None
+        await update_pool(devices, excess_power)
+        battery_percentage = energy_site_status['battery_percentage'] if energy_site_status else 100  # Assumes enough battery is available if connection to energy site cannot be established 
+        await update_lights(devices, battery_percentage)
         
 
-async def main(tesla_user_id: str, teslapy_cache_file: str, iaqualink_user_id: str, iaqualink_password: str):
+async def main(tesla_user_id: str, teslapy_cache_file: str, iaqualink_user_id: str, iaqualink_password: str) -> bool:
     """Log, print status and reset tesla and iAquaLink devices."""
     print(f'Starting Task #{TASK_INDEX}, Attempt #{TASK_ATTEMPT}...')
-    energy_system_status = get_energy_system_status(tesla_user_id, teslapy_cache_file)
-    await control_iaqualink(iaqualink_user_id, iaqualink_password, energy_system_status)
-    print(f'Completed Task #{TASK_INDEX}.')
+    try:
+        energy_site_status = get_energy_site_status(tesla_user_id, teslapy_cache_file)
+        await control_iaqualink(iaqualink_user_id, iaqualink_password, energy_site_status)
+    except Exception as err:
+        # Retry to control the pool without the energy site status before failing
+        await control_iaqualink(iaqualink_user_id, iaqualink_password, None)
+        raise err
+    print(f'Completed Task #{TASK_INDEX}.')   
 
 
 # Start script
