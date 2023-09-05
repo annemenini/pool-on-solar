@@ -13,6 +13,8 @@ import pytz
 import teslapy
 from suntime import Sun
 
+from config import Config
+
 # [START cloudrun_jobs_env_vars]
 # Retrieve Job-defined env vars
 TASK_INDEX = os.getenv('CLOUD_RUN_TASK_INDEX', 0)
@@ -169,6 +171,7 @@ async def main(tesla_user_id: str, teslapy_cache_file: str, iaqualink_user_id: s
     If energy site connection fails, still ensure devices are turned off outside of operating hours.
     """
     print(f'Starting Task #{TASK_INDEX}, Attempt #{TASK_ATTEMPT}...')
+    config = Config(tesla_user_id, iaqualink_user_id, iaqualink_password)
     try:
         energy_site_status = get_energy_site_status(tesla_user_id, teslapy_cache_file)
         await control_iaqualink(iaqualink_user_id, iaqualink_password, energy_site_status)
