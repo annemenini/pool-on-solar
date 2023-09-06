@@ -10,7 +10,12 @@ ENV APP_HOME /app
 WORKDIR $APP_HOME
 COPY . ./
 
+# Install protobuf
+brew install protobuf
+
 # Install production dependencies.
 RUN pip install --no-cache-dir -r requirements.txt
+
+protoc --python_out=. config.proto
 
 CMD python main.py

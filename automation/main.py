@@ -6,14 +6,13 @@ from typing import Any, Dict, Optional
 
 import asyncio
 
+import config_pb2
 import iaqualink
 from iaqualink.client import AqualinkClient
 from iaqualink.device import AqualinkDevice
 import pytz
 import teslapy
 from suntime import Sun
-
-from config import Config
 
 # [START cloudrun_jobs_env_vars]
 # Retrieve Job-defined env vars
@@ -171,7 +170,14 @@ async def main(tesla_user_id: str, teslapy_cache_file: str, iaqualink_user_id: s
     If energy site connection fails, still ensure devices are turned off outside of operating hours.
     """
     print(f'Starting Task #{TASK_INDEX}, Attempt #{TASK_ATTEMPT}...')
-    config = Config(tesla_user_id, iaqualink_user_id, iaqualink_password)
+    config = config_pb2.Config()
+    with open('/app/config/config.pbtxt', 'rb') as f:
+        config_str = f.read()
+        config.ParseFromString(f.read())
+    config.tesla.user_id = tesla_user_id
+    config.iaqualink.user_id = iaqualink_user_id
+    config.iaqualink.password = iaqualink_password
+    print(config)
     try:
         energy_site_status = get_energy_site_status(tesla_user_id, teslapy_cache_file)
         await control_iaqualink(iaqualink_user_id, iaqualink_password, energy_site_status)
