@@ -2,6 +2,7 @@ import datetime
 import json
 import os
 import sys
+from typing import Any, Dict
 
 import teslapy
 
@@ -11,7 +12,7 @@ TASK_INDEX = os.getenv('CLOUD_RUN_TASK_INDEX', 0)
 TASK_ATTEMPT = os.getenv('CLOUD_RUN_TASK_ATTEMPT', 0)
 # Retrieve User-defined env vars
 TESLA_USER_ID = os.getenv('TESLA_USER_ID')
-TESLAPY_CACHE_FILE = os.getenv('TESLA_USER_ID', '/app/config/cache.json')
+TESLAPY_CACHE_FILE = os.getenv('TESLAPY_CACHE_FILE', '/app/config/cache.json')
 # [END cloudrun_jobs_env_vars]
 
 
@@ -25,8 +26,9 @@ def get_energy_site_history(user_id: str, cache_file: str) -> Dict[str, Any]:
     """
     tesla = teslapy.Tesla(user_id, cache_file=cache_file)
     products =  tesla.api('PRODUCT_LIST')['response']  
-    energy_site_id = [p.get('energy_site_id') for p in products if p.get('resource_type') == 'battery'][0]
-    data = tesla.api('HISTORY_DATA', {'site_id': energy_site_id})['response']
+    product = [p for p in products if p.get('resource_type') == 'battery'][0]
+    energy_site = teslapy.Product(product, tesla)
+    data = energy_site.get_calendar_history_data(kind='power', period='day', start_date='2023-09-05T07:00:00.000Z', end_date='2023-09-06T06:59:59.999Z', installation_timezone='US/Pacific', timezone='US/Pacific')
     print(data)
     tesla.close()
     return {}
