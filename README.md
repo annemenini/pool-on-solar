@@ -11,7 +11,7 @@ Requirements:
 
 Set the following env vars:
 
+- `CONFIG_FILE`: Location of the pbtxt config file (see automation/config.proto for the config definition)
 - `TESLA_USER_ID`: user email of your Tesla account
-- `TESLAPY_CACHE_FILE`: path to the `cache.json` file created after a first authentication via TeslaPy. We recommend storing this file in a secret and mounting it in your container. For example `/app/config/cache.json`.
 - `IAQUALINK_USER_ID`: user email of your iAquaLink account 
 - `IAQUALINK_PASSWORD`: password of your iAquaLink account, we recommend storing this in a secret

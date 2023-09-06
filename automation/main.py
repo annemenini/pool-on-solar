@@ -22,9 +22,9 @@ TASK_ATTEMPT = os.getenv('CLOUD_RUN_TASK_ATTEMPT', 0)
 DRY_RUN = os.getenv('DRY_RUN', default=False)
 # Retrieve User-defined env vars
 CONFIG_FILE = os.getenv('CONFIG_FILE', '/app/config/config.pbtxt')
-TESLA_USER_ID = os.getenv('TESLA_USER_ID', 0)
-IAQUALINK_USER_ID = os.getenv('IAQUALINK_USER_ID', 0)
-IAQUALINK_PASSWORD = os.getenv('IAQUALINK_PASSWORD', 0)
+TESLA_USER_ID = os.getenv('TESLA_USER_ID')
+IAQUALINK_USER_ID = os.getenv('IAQUALINK_USER_ID')
+IAQUALINK_PASSWORD = os.getenv('IAQUALINK_PASSWORD')
 # [END cloudrun_jobs_env_vars]
 
 

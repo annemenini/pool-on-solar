@@ -13,7 +13,7 @@ TESLA_USER_ID = os.getenv("TESLA_USER_ID", 0)
 # [END cloudrun_jobs_env_vars]
 
 
-def generate_tesla_authentication_teslapy_cache_json(user_id: str):
+def generate_tesla_authentication_teslapy_cache_json(user_id: str) -> None:
     """Generate the TeslaPy Cache json required for authentication."""
     tesla = teslapy.Tesla(user_id)
     if not tesla.authorized:
@@ -24,7 +24,7 @@ def generate_tesla_authentication_teslapy_cache_json(user_id: str):
 
 
 # Define main script
-def main(tesla_user_id: str):
+def main(tesla_user_id: str) -> None:
     """Log, print status and reset tesla and iAquaLink devices."""
     print(f"Starting Task #{TASK_INDEX}, Attempt #{TASK_ATTEMPT}...")
     genera_tesla_authentication_teslapy_cache_json(tesla_user_id)
