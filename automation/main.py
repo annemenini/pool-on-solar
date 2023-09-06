@@ -39,13 +39,15 @@ async def try_switch_device(device: AqualinkDevice, mode: str) -> bool:
     """
     if mode == 'off' and device.is_on:
         if not DRY_RUN:
+            print(f'Trying to turn {device.label} OFF (state: {device.state})')
             await device.turn_off()
-        print(f'Turning {device.label} OFF')
+        print(f'Turning {device.label} OFF (state: {device.state})')
         return True
     elif mode == 'on' and not device.is_on:
         if not DRY_RUN:
+            print(f'Trying to turn {device.label} ON (state: {device.state})')
             await device.turn_on()
-        print(f'Turning {device.label} ON')
+        print(f'Turning {device.label} ON (state: {device.state})')
         return True
     return False
 
