@@ -11,11 +11,13 @@ WORKDIR $APP_HOME
 COPY . ./
 
 # Install protobuf
-brew install protobuf
+RUN apt-get update
+RUN apt-get install -y protobuf-compiler
 
 # Install production dependencies.
 RUN pip install --no-cache-dir -r requirements.txt
 
-protoc --python_out=. config.proto
+# Generate config_pb2.py
+RUN protoc --python_out=. config.proto
 
 CMD python main.py

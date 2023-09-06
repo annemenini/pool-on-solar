@@ -1,5 +1,6 @@
 asyncio
 iaqualink==0.5.0
+protobuf
 pytz
 suntime
 TeslaPy==2.8.0

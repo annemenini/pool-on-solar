@@ -1,27 +1,25 @@
 # proto-file: config.proto
 # proto-message: Config
 
-{
-    tesla {
-        cahce_file: "/app/config/cahce.json"
+tesla {
+    cache_file: "/app/config/cache.json"
+}
+iaqualink {
+    pool {
+        devices: ["pool_pump", "aux_1"]
+        activation_excess_power: 2000
+        deactivation_excess_power: 500
+        operating_window_start: 8
+        operating_window_end: 18
     }
-    iaqualink {
-        pool {
-            devices: ["pool_pump", "aux_1"]
-            activation_excess_power: 2000
-            deactivation_excess_power: 500
-            operating_window_start: 8
-            operating_window_end: 18
-        }
-        light {
-            devices: ["aux_B1", "aux_B3", "aux_B4"]
-            minimum_battery: 50
-            operating_window_end: 22
-        }
+    light {
+        devices: ["aux_B1", "aux_B3", "aux_B4"]
+        minimum_battery: 50
+        operating_window_end: 22
     }
-    location {
-        timezone: "US/Pacific""
-        latitude: 37.3861
-        longitude: -122.0839
-    }
+}
+location {
+    timezone: "US/Pacific"
+    latitude: 37.3861
+    longitude: -122.0839
 }
