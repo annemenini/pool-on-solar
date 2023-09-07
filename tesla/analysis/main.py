@@ -16,12 +16,14 @@ TASK_ATTEMPT = os.getenv('CLOUD_RUN_TASK_ATTEMPT', 0)
 # Retrieve User-defined env vars
 TESLA_USER_ID = os.getenv('TESLA_USER_ID')
 TESLAPY_CACHE_FILE = os.getenv('TESLAPY_CACHE_FILE', '/app/config/cache.json')
+TIMEZONE = os.getenv('TIMEZONE', 'UTC')
+POWER_TABLE_ID = os.getenv('POWER_TABLE_ID')
+ENERGY_TABLE_ID = os.getenv('ENERGY_TABLE_ID')
 # [END cloudrun_jobs_env_vars]
-_TIMEZONE = 'US/Pacific'
 
 def get_yesterday_start_end_date_in_utc() -> Tuple[str, str]:
     current_date = datetime.datetime.now()
-    local_time_zone = pytz.timezone(_TIMEZONE)
+    local_time_zone = pytz.timezone(TIMEZONE)
     current_date = current_date.astimezone(local_time_zone)
     start_date = current_date - datetime.timedelta(days=1)
     start_date = start_date.replace(hour=0, minute=0, second=0)
@@ -34,30 +36,31 @@ def get_yesterday_start_end_date_in_utc() -> Tuple[str, str]:
     return start_date_str, end_date_str
 
 
-def get_energy_site_history(user_id: str, cache_file: str) -> List[Dict[str, Any]]:
+def get_energy_site_history(user_id: str, cache_file: str) -> Tuple[List[Dict[str, Any]], List[Dict[str, Any]]]:
     """Gets historical power data from yesterday by 5-minutes increments."""
     tesla = teslapy.Tesla(user_id, cache_file=cache_file)
     products =  tesla.api('PRODUCT_LIST')['response']  
     product = [p for p in products if p.get('resource_type') == 'battery'][0]
     energy_site = teslapy.Product(product, tesla)
     start_date, end_date = get_yesterday_start_end_date_in_utc()
-    data = energy_site.get_calendar_history_data(kind='power', period='day', start_date=start_date, end_date=end_date, installation_timezone=_TIMEZONE, timezone=_TIMEZONE)
+    power_data = energy_site.get_calendar_history_data(kind='power', period='day', start_date=start_date, end_date=end_date, installation_timezone=TIMEZONE, timezone=TIMEZONE)
+    energy_data = energy_site.get_calendar_history_data(kind='energy', period='day', start_date=start_date, end_date=end_date, installation_timezone=TIMEZONE, timezone=TIMEZONE)
     tesla.close()
-    return data['time_series']
+    return power_data['time_series'], energy_data['time_series']
 
 
-def store_data(data: List[Dict[str, Any]]) -> None:
+def store_data(power_data: List[Dict[str, Any]], energy_data: List[Dict[str, Any]]) -> None:
     client = bigquery.Client()
-    table_id = 'pool-on-solar.hilo_tesla.power'
-    errors = client.insert_rows_json(table_id, data) 
+    client.insert_rows_json(POWER_TABLE_ID, power_data)
+    client.insert_rows_json(ENERGY_TABLE_ID, energy_data) 
 
 
 # Define main script
 def main(tesla_user_id: str, teslapy_cache_file: str) -> None:
     """Log, print status and reset tesla and iAquaLink devices."""
     print(f"Starting Task #{TASK_INDEX}, Attempt #{TASK_ATTEMPT}...")
-    data = get_energy_site_history(tesla_user_id, teslapy_cache_file)
-    store_data(data)
+    power_data, energy_data = get_energy_site_history(tesla_user_id, teslapy_cache_file)
+    store_data(power_data, energy_data)
     print(f"Completed Task #{TASK_INDEX}.")
 
 
