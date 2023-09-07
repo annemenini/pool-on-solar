@@ -23,6 +23,7 @@ DRY_RUN = os.getenv('DRY_RUN', default=False)
 # Retrieve User-defined env vars
 CONFIG_FILE = os.getenv('CONFIG_FILE', '/app/config/config.pbtxt')
 TESLA_USER_ID = os.getenv('TESLA_USER_ID')
+ENERGY_SITE_ID = os.getenv('ENERGY_SITE_ID')
 IAQUALINK_USER_ID = os.getenv('IAQUALINK_USER_ID')
 IAQUALINK_PASSWORD = os.getenv('IAQUALINK_PASSWORD')
 # [END cloudrun_jobs_env_vars]
@@ -53,10 +54,11 @@ async def try_switch_device(device: AqualinkDevice, mode: str) -> bool:
 
 
 class Controller:
-    def __init__(self, config_file: str, tesla_user_id: str, iaqualink_user_id: str, iaqualink_password: str):
+    def __init__(self, config_file: str, tesla_user_id: str, energy_site_id: str, iaqualink_user_id: str, iaqualink_password: str):
         with open(config_file, 'rb') as f:
             self._config = text_format.Parse(f.read(), config_pb2.Config())
         self._config.tesla.user_id = tesla_user_id
+        self._config.tesla.energy_site_id = energy_site_id
         self._config.iaqualink.user_id = iaqualink_user_id
         self._config.iaqualink.password = iaqualink_password
 
@@ -69,9 +71,13 @@ class Controller:
                 * battery charge in %            
         """
         tesla = teslapy.Tesla(self._config.tesla.user_id, cache_file=self._config.tesla.cache_file)
-        products =  tesla.api('PRODUCT_LIST')['response']  
-        energy_site_id = [p.get('energy_site_id') for p in products if p.get('resource_type') == 'battery'][0]
-        data = tesla.api('SITE_DATA', {'site_id': energy_site_id})['response']
+        if not self._config.tesla.energy_site_id:
+            products =  tesla.api('PRODUCT_LIST')['response']
+            if isinstance(products, dict): 
+                self._config.tesla.energy_site_id = [p.get('energy_site_id') for p in products if p.get('resource_type') == 'battery'][0]
+            else:
+                raise ValueError('Could not retrieve energy_site_id.')
+        data = tesla.api('SITE_DATA', {'site_id': self._config.tesla.energy_site_id})['response']
         solar_power = data.get('solar_power')
         load_power = data.get('load_power')
         excess_power = solar_power - load_power
@@ -168,10 +174,10 @@ class Controller:
             raise err
 
 
-async def main(config_file: str, tesla_user_id: str, iaqualink_user_id: str, iaqualink_password: str) -> bool:
+async def main(config_file: str, tesla_user_id: str, energy_site_id: str, iaqualink_user_id: str, iaqualink_password: str) -> bool:
     """Load config and update home devices according to its energy status."""
     print(f'Starting Task #{TASK_INDEX}, Attempt #{TASK_ATTEMPT}...')
-    controller = Controller(config_file, tesla_user_id, iaqualink_user_id, iaqualink_password)
+    controller = Controller(config_file, tesla_user_id, energy_site_id, iaqualink_user_id, iaqualink_password)
     await controller.control_home()
     print(f'Completed Task #{TASK_INDEX}.')   
 
@@ -179,7 +185,7 @@ async def main(config_file: str, tesla_user_id: str, iaqualink_user_id: str, iaq
 # Start script
 if __name__ == '__main__':
     try:
-        asyncio.run(main(CONFIG_FILE, TESLA_USER_ID, IAQUALINK_USER_ID, IAQUALINK_PASSWORD))
+        asyncio.run(main(CONFIG_FILE, TESLA_USER_ID, ENERGY_SITE_ID, IAQUALINK_USER_ID, IAQUALINK_PASSWORD))
     except Exception as err:
         message = (
             f'Task #{TASK_INDEX}, ' + f'Attempt #{TASK_ATTEMPT} failed: {str(err)}'
