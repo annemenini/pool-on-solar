@@ -17,9 +17,15 @@ message Config {
             // Excess power threshold below which pool devices start to be deactivated (in Watt)
             optional int32 deactivation_excess_power = 3 [default = 500];
             // Pool will not turn on before 8h00
-            optional int32 operating_window_start = 4 [default = 8];
+            optional int32 max_operating_window_start = 4 [default = 8];
             // Pool will be shut off in any case after 18h00
-            optional int32 operating_window_end = 5 [default = 18];
+            optional int32 max_operating_window_end = 5 [default = 18];
+            // Pool will run at least from min_operating_window_start (if > 0)
+            optional int32 min_operating_window_start = 6 [default = -1];
+            // Pool will run at least until min_operating_window_end (if > 0)
+            optional int32 min_operating_window_end = 7 [default = -1];
+            // Pool will not run if the battery charge is below 50%
+            optional int32 minimum_battery = 8 [default = 50];
         }
 
         message Light {
@@ -27,7 +33,7 @@ message Config {
             // Minimum battery required to turn on the lights, in %
             optional int32 minimum_battery = 2 [default = 50];
             // Lights will be shut off in any case after 22h00
-            optional int32 operating_window_end = 3 [default = 22];
+            optional int32 max_operating_window_end = 3 [default = 22];
         }
 
         optional string user_id = 1;
