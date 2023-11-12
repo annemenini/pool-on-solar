@@ -20,6 +20,11 @@ def generate_tesla_authentication_teslapy_cache_json(user_id: str) -> None:
         print('Use browser to login. Page Not Found will be shown at success.')
         print('Open this URL: ' + tesla.authorization_url())
         tesla.fetch_token(authorization_response=input('Enter URL after authentication: '))
+        print('Your TeslaPy cache file is now saved in ./cache.json')
+        products =  tesla.api('PRODUCT_LIST')['response']
+        if isinstance(products, dict): 
+            energy_site_id = [p.get('energy_site_id') for p in products if p.get('resource_type') == 'battery'][0]
+            print(f'FYI, your energy site ID is: {energy_site_id}')
     tesla.close()
 
 

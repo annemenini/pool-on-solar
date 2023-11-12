@@ -9,13 +9,14 @@ iaqualink {
         devices: ["pool_pump", "aux_1"]
         activation_excess_power: 2000
         deactivation_excess_power: 500
-        operating_window_start: 8
-        operating_window_end: 18
+        max_operating_window_start: 8
+        max_operating_window_end: 18
+        minimum_battery: 50
     }
     light {
         devices: ["aux_B1", "aux_B3", "aux_B4"]
         minimum_battery: 50
-        operating_window_end: 22
+        max_operating_window_end: 22
     }
 }
 location {

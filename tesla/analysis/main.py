@@ -17,9 +17,36 @@ TASK_ATTEMPT = os.getenv('CLOUD_RUN_TASK_ATTEMPT', 0)
 TESLA_USER_ID = os.getenv('TESLA_USER_ID')
 TESLAPY_CACHE_FILE = os.getenv('TESLAPY_CACHE_FILE', '/app/config/cache.json')
 TIMEZONE = os.getenv('TIMEZONE', 'UTC')
+INITIALIZE_TABLES = os.getenv('INITIALIZE_TABLES', false)
+DATASET_ID = os.getenv('DATASET_ID')
 POWER_TABLE_ID = os.getenv('POWER_TABLE_ID')
 ENERGY_TABLE_ID = os.getenv('ENERGY_TABLE_ID')
 # [END cloudrun_jobs_env_vars]
+
+
+def initialize_bigquery_tables() -> Tuple[str, str]:
+    client = bigquery.Client()
+    project = client.project
+    dataset_ref = bigquery.DatasetReference(project, DATASET_ID)
+
+    table_ref = dataset_ref.table('power')
+    schema = [
+        bigquery.SchemaField("timestamnp", "TIMESTAMP"),
+        bigquery.SchemaField("solar_power", "FLOAT"),
+        bigquery.SchemaField("battery_power", "FLOAT"),
+        bigquery.SchemaField("grid_power", "FLOAT"),
+        bigquery.SchemaField("grid_services_power", "FLOAT"),
+        bigquery.SchemaField("generator_power", "FLOAT"),
+    ]
+    table = bigquery.Table(table_ref, schema=schema)
+    table.time_partitioning = bigquery.TimePartitioning(
+        type_=bigquery.TimePartitioningType.MONTH,
+        field="timestamnp",  # name of column to use for partitioning
+        expiration_ms=7776000000,
+    )  # 90 days
+
+    table = client.create_table(table)
+
 
 def get_yesterday_start_end_date_in_utc() -> Tuple[str, str]:
     current_date = datetime.datetime.now()
@@ -59,8 +86,11 @@ def store_data(power_data: List[Dict[str, Any]], energy_data: List[Dict[str, Any
 def main(tesla_user_id: str, teslapy_cache_file: str) -> None:
     """Log, print status and reset tesla and iAquaLink devices."""
     print(f"Starting Task #{TASK_INDEX}, Attempt #{TASK_ATTEMPT}...")
-    power_data, energy_data = get_energy_site_history(tesla_user_id, teslapy_cache_file)
-    store_data(power_data, energy_data)
+    if INITIALIZE_TABLES:
+        initialize_bigquery_tables()
+    else:
+        power_data, energy_data = get_energy_site_history(tesla_user_id, teslapy_cache_file)
+        store_data(power_data, energy_data)
     print(f"Completed Task #{TASK_INDEX}.")
 
 

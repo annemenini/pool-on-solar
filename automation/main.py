@@ -90,12 +90,17 @@ class Controller:
         local_time_zone = pytz.timezone(self._config.location.timezone)
         return time.astimezone(local_time_zone)
 
-    def is_pool_operable(self) -> None:
-        """Checks if the current time is within the pool operating window."""
+    def get_forced_operation_mode(self) -> None:
+        """Checks if the current time is within the pool forced on/off operating window."""
         current_time = self.convert_to_local_time(datetime.datetime.now())
-        return current_time.hour >= self._config.iaqualink.pool.operating_window_start and current_time.hour < self._config.iaqualink.pool.operating_window_end
+        if self._config.iaqualink.pool.min_operating_window_start >= 0 and self._config.iaqualink.pool.min_operating_window_end >= 0:
+            if current_time.hour >= self._config.iaqualink.pool.min_operating_window_start and current_time.hour < self._config.iaqualink.pool.min_operating_window_end:
+                return 'on'
+        if current_time.hour < self._config.iaqualink.pool.max_operating_window_start or current_time.hour >= self._config.iaqualink.pool.max_operating_window_end:
+            return 'off'
+        return 'flexible'
 
-    async def update_pool(self, devices: Dict[str, AqualinkDevice], excess_power: Optional[int]) -> None:
+    async def update_pool(self, devices: Dict[str, AqualinkDevice], excess_power: Optional[int], battery_percentage: float) -> None:
         """Switches various iAqualink devices.
         
         In particular:
@@ -107,15 +112,20 @@ class Controller:
             devices: available devices
             excess power
         """
-        if not self.is_pool_operable():
+        get_forced_operation_mode = self.get_forced_operation_mode()
+        if get_forced_operation_mode == 'off':
             for device_key in reversed(self._config.iaqualink.pool.devices):
                 await try_switch_device(devices[device_key], 'off')
+            return
+        if get_forced_operation_mode == 'on':
+            for device_key in self._config.iaqualink.pool.devices:
+                await try_switch_device(devices[device_key], 'on')
             return
 
         if excess_power is None:
             return
         
-        if excess_power < self._config.iaqualink.pool.deactivation_excess_power:
+        if battery_percentage < self._config.iaqualink.pool.minimum_battery or excess_power < self._config.iaqualink.pool.deactivation_excess_power:
             is_consumption_reduced = False
             for device_key in reversed(self._config.iaqualink.pool.devices):
                 is_consumption_reduced = await try_switch_device(devices[device_key], 'off')
@@ -142,7 +152,7 @@ class Controller:
         sunset_time = self.convert_to_local_time(sun.get_sunset_time())
         turn_on_time = sunset_time
         current_time = self.convert_to_local_time(datetime.datetime.now())
-        turn_off_time = current_time.replace(hour=self._config.iaqualink.light.operating_window_end, minute=0, second=0)
+        turn_off_time = current_time.replace(hour=self._config.iaqualink.light.max_operating_window_end, minute=0, second=0)
         if current_time.time() < turn_on_time.time() or current_time.time() > turn_off_time.time():
             for light_key in self._config.iaqualink.light.devices:
                 await try_switch_device(devices[light_key], 'off')
@@ -156,8 +166,8 @@ class Controller:
             systems = await client.get_systems()
             devices = await list(systems.values())[0].get_devices()
             excess_power = energy_site_status['excess_power'] if energy_site_status else None
-            await self.update_pool(devices, excess_power)
             battery_percentage = energy_site_status['battery_percentage'] if energy_site_status else 100  # Assumes enough battery is available if connection to energy site cannot be established 
+            await self.update_pool(devices, excess_power, battery_percentage)
             await self.update_lights(devices, battery_percentage)
         
     async def control_home(self) -> None:
