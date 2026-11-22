@@ -785,8 +785,30 @@ class DashboardServerTests(unittest.TestCase):
             self.assertIn('4.20 kW', html)
             self.assertIn('Filter Pump', html)
             self.assertIn('88%', html)
-            self.assertIn('pool-on-solar-abc12', html)
+            self.assertIn('Succeeded', html)
+            self.assertIn('Runs every 15 minutes', html)
+            self.assertNotIn('*/15 * * * *', html)
+            self.assertNotIn('pool-on-solar-abc12', html)
             self.assertIn('/scheduler/pause', html)
+
+            # EXECUTION_PENDING renders cleanly as "Starting" without raw enum
+            pending_html = self.dash_mod.render_dashboard_html({
+                'tesla': {'status': 'ok', 'solar_power': 0, 'load_power': 500, 'excess_power': -500},
+                'iaqualink': {'status': 'ok', 'pool': [], 'lights': []},
+                'job_health': {
+                    'cloud_run_job': {
+                        'name': 'pool-on-solar',
+                        'execution': 'pool-on-solar-9mpbd',
+                        'completion_status': 'EXECUTION_PENDING',
+                        'create_time': '2026-11-22T05:00:00Z',
+                    },
+                    'scheduler': {'state': 'ENABLED', 'schedule': '*/15 * * * *'},
+                },
+                'token_health': {'status': 'ok', 'expires_in_seconds': 3600},
+            }).decode('utf-8')
+            self.assertIn('Starting', pending_html)
+            self.assertNotIn('EXECUTION_PENDING', pending_html)
+            self.assertNotIn('pool-on-solar-9mpbd', pending_html)
 
             # Second GET /api/status hits cache without extra upstream calls
             conn.request('GET', '/api/status')

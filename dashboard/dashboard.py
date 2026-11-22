@@ -391,6 +391,29 @@ def _format_duration_seconds(seconds: Optional[int]) -> str:
     return f'{minutes}m'
 
 
+def _format_cron_schedule(expr: Optional[str]) -> str:
+    if not expr:
+        return '—'
+    parts = expr.strip().split()
+    if len(parts) != 5:
+        return f'Schedule: {expr}'
+    minute, hour, dom, month, dow = parts
+    if dom == '*' and month == '*' and dow == '*':
+        if minute == '*' and hour == '*':
+            return 'Runs every minute'
+        if minute.startswith('*/') and hour == '*' and minute[2:].isdigit():
+            n = int(minute[2:])
+            return 'Runs every minute' if n == 1 else f'Runs every {n} minutes'
+        if minute == '0' and hour == '*':
+            return 'Runs every hour'
+        if minute == '0' and hour.startswith('*/') and hour[2:].isdigit():
+            n = int(hour[2:])
+            return 'Runs every hour' if n == 1 else f'Runs every {n} hours'
+        if minute.isdigit() and hour.isdigit():
+            return f'Runs daily at {int(hour):02d}:{int(minute):02d}'
+    return f'Schedule: {expr}'
+
+
 def _render_device_rows(devices: List[Dict[str, Any]]) -> str:
     if not devices:
         return '<p class="muted">No devices configured.</p>'
@@ -527,15 +550,28 @@ def render_dashboard_html(
     exec_status = cr_job.get('completion_status')
     if exec_status == 'EXECUTION_SUCCEEDED':
         job_badge = '<span class="pill on-pill">Succeeded</span>'
+        job_time_prefix = 'Last run'
     elif exec_status == 'EXECUTION_FAILED':
         job_badge = '<span class="pill err-pill">Failed</span>'
+        job_time_prefix = 'Last run'
+    elif exec_status == 'EXECUTION_RUNNING':
+        job_badge = '<span class="pill warn-pill">Running</span>'
+        job_time_prefix = 'Started'
+    elif exec_status == 'EXECUTION_PENDING':
+        job_badge = '<span class="pill warn-pill">Starting</span>'
+        job_time_prefix = 'Started'
+    elif exec_status == 'EXECUTION_CANCELLED':
+        job_badge = '<span class="pill off-pill">Cancelled</span>'
+        job_time_prefix = 'Last run'
     elif exec_status:
-        job_badge = f'<span class="pill warn-pill">{escape(str(exec_status))}</span>'
+        pretty_status = str(exec_status).removeprefix('EXECUTION_').replace('_', ' ').title()
+        job_badge = f'<span class="pill warn-pill">{escape(pretty_status)}</span>'
+        job_time_prefix = 'Last run'
     else:
         job_badge = f'<span class="pill off-pill">{escape(str(cr_job.get("error") or "Unknown"))}</span>'
+        job_time_prefix = 'Last run'
 
     last_run_rel = _format_relative_iso(cr_job.get('completion_time') or cr_job.get('create_time'))
-    exec_id = escape(str(cr_job.get('execution') or '—'))
 
     if sched_state == 'ENABLED':
         sched_badge = '<span class="pill on-pill">Enabled</span>'
@@ -554,7 +590,7 @@ def render_dashboard_html(
     else:
         sched_badge = f'<span class="pill off-pill">{escape(str(sched_state or sched.get("error") or "Unknown"))}</span>'
         sched_action_html = ''
-    sched_cron = escape(str(sched.get('schedule') or '—'))
+    sched_desc = _format_cron_schedule(sched.get('schedule'))
 
     if token_health.get('status') == 'ok':
         tok_badge = '<span class="pill on-pill">Valid</span>'
@@ -777,14 +813,14 @@ def render_dashboard_html(
           <span class="health-title">Cloud Run Job</span>
           {job_badge}
         </div>
-        <div class="health-detail">Last run {escape(last_run_rel)} (<code>{exec_id}</code>)</div>
+        <div class="health-detail">{escape(job_time_prefix)} {escape(last_run_rel)}</div>
       </div>
       <div class="card">
         <div class="health-top">
           <span class="health-title">Scheduler</span>
           {sched_badge}
         </div>
-        <div class="health-detail">Cron <code>{sched_cron}</code></div>
+        <div class="health-detail">{escape(sched_desc)}</div>
         {sched_action_html}
       </div>
       <div class="card">
