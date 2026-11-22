@@ -1,3 +1,4 @@
 google-cloud-bigquery
+google-cloud-secret-manager>=2.20.0
+httpx[http2]>=0.27.0
 pytz
-TeslaPy==2.8.0
