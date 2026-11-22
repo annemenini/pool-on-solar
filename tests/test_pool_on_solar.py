@@ -22,6 +22,7 @@ REPO_ROOT = Path(__file__).resolve().parent.parent
 AUTOMATION_DIR = REPO_ROOT / 'automation'
 AUTH_DIR = REPO_ROOT / 'tesla' / 'authentication'
 ANALYSIS_DIR = REPO_ROOT / 'tesla' / 'analysis'
+DASHBOARD_DIR = REPO_ROOT / 'dashboard'
 
 
 def _install_stub_httpx() -> None:
@@ -104,7 +105,9 @@ class TeslaFleetModuleTests(unittest.TestCase):
     def test_automation_and_analysis_fleet_modules_are_in_sync(self):
         auto_src = (AUTOMATION_DIR / 'tesla_fleet.py').read_text(encoding='utf-8')
         analysis_src = (ANALYSIS_DIR / 'tesla_fleet.py').read_text(encoding='utf-8')
+        dashboard_src = (DASHBOARD_DIR / 'tesla_fleet.py').read_text(encoding='utf-8')
         self.assertEqual(auto_src, analysis_src)
+        self.assertEqual(auto_src, dashboard_src)
 
     def test_token_data_expiry_and_rotation(self):
         now = 1_700_000_000.0
@@ -412,6 +415,9 @@ class TeslaFleetModuleTests(unittest.TestCase):
             'tesla/authentication/server.py',
             'tesla/analysis/tesla_fleet.py',
             'tesla/analysis/main.py',
+            'dashboard/tesla_fleet.py',
+            'dashboard/dashboard.py',
+            'dashboard/server.py',
         ]:
             source = (REPO_ROOT / rel).read_text(encoding='utf-8')
             compile(source, rel, 'exec')
@@ -684,6 +690,143 @@ class TeslaOAuthServerTests(unittest.TestCase):
             resp = conn.getresponse()
             resp.read()
             self.assertEqual(resp.status, 403)
+            conn.close()
+        finally:
+            server.shutdown()
+            server.server_close()
+
+
+class DashboardServerTests(unittest.TestCase):
+    @classmethod
+    def setUpClass(cls):
+        _install_stub_httpx()
+        sys.path.insert(0, str(DASHBOARD_DIR))
+        cls.dash_mod = _load_module('dashboard_module', DASHBOARD_DIR / 'dashboard.py')
+        cls.dash_server_mod = _load_module('dashboard_server', DASHBOARD_DIR / 'server.py')
+
+    def test_dashboard_ttl_cache_and_http_endpoints(self):
+        call_counts = {'tesla': 0, 'iaq': 0, 'job': 0}
+
+        def fake_tesla(_cfg):
+            call_counts['tesla'] += 1
+            return (
+                {
+                    'status': 'ok',
+                    'solar_power': 4200,
+                    'load_power': 1500,
+                    'excess_power': 2700,
+                    'battery_power': -1200,
+                    'grid_power': 0,
+                    'grid_status': 'Active',
+                    'percentage_charged': 88.0,
+                },
+                {'status': 'ok', 'expires_in_seconds': 7200},
+            )
+
+        def fake_iaq(_cfg):
+            call_counts['iaq'] += 1
+            return {
+                'status': 'ok',
+                'system_name': 'Pool',
+                'pool': [
+                    {'key': 'pool_pump', 'label': 'Filter Pump', 'found': True, 'is_on': True, 'state': '1'},
+                    {'key': 'aux_1', 'label': 'Cleaner', 'found': True, 'is_on': False, 'state': '0'},
+                ],
+                'lights': [
+                    {'key': 'aux_B1', 'label': 'Light Back', 'found': True, 'is_on': False, 'state': '0'},
+                ],
+                'temperatures': {'pool_temp': '78', 'air_temp': '72'},
+            }
+
+        sched_state = {'state': 'ENABLED'}
+        toggled_actions = []
+
+        def fake_job(_cfg):
+            call_counts['job'] += 1
+            return {
+                'status': 'ok',
+                'cloud_run_job': {
+                    'name': 'pool-on-solar',
+                    'execution': 'pool-on-solar-abc12',
+                    'completion_status': 'EXECUTION_SUCCEEDED',
+                    'completion_time': '2026-11-22T04:40:00Z',
+                },
+                'scheduler': {
+                    'name': 'pool-on-solar-scheduler-trigger',
+                    'state': sched_state['state'],
+                    'schedule': '*/15 * * * *',
+                },
+            }
+
+        def fake_toggle(_cfg, action):
+            toggled_actions.append(action)
+            sched_state['state'] = 'PAUSED' if action == 'pause' else 'ENABLED'
+            return {'state': sched_state['state']}
+
+        collector = self.dash_mod.StatusCollector(
+            self.dash_mod.DashboardConfig(cache_ttl_seconds=60),
+            tesla_fetcher=fake_tesla,
+            iaqualink_fetcher=fake_iaq,
+            job_health_fetcher=fake_job,
+            scheduler_toggler=fake_toggle,
+        )
+        server = self.dash_server_mod.create_server(host='127.0.0.1', port=0, collector=collector)
+        thread = threading.Thread(target=server.serve_forever, daemon=True)
+        thread.start()
+        port = server.server_address[1]
+        try:
+            conn = HTTPConnection('127.0.0.1', port)
+
+            # First GET / populates cache and renders Pause button when ENABLED
+            conn.request('GET', '/')
+            resp = conn.getresponse()
+            html = resp.read().decode('utf-8')
+            self.assertEqual(resp.status, 200)
+            self.assertIn('4.20 kW', html)
+            self.assertIn('Filter Pump', html)
+            self.assertIn('88%', html)
+            self.assertIn('pool-on-solar-abc12', html)
+            self.assertIn('/scheduler/pause', html)
+
+            # Second GET /api/status hits cache without extra upstream calls
+            conn.request('GET', '/api/status')
+            resp = conn.getresponse()
+            data = json.loads(resp.read().decode('utf-8'))
+            self.assertEqual(resp.status, 200)
+            self.assertTrue(data['cached'])
+            self.assertEqual(data['tesla']['excess_power'], 2700)
+            self.assertEqual(call_counts, {'tesla': 1, 'iaq': 1, 'job': 1})
+
+            # Cross-origin POST is rejected
+            conn.request('POST', '/scheduler/pause', headers={'Origin': 'https://evil.example'})
+            resp = conn.getresponse()
+            resp.read()
+            self.assertEqual(resp.status, 403)
+
+            # Same-origin POST /scheduler/pause pauses and invalidates cache
+            conn.request(
+                'POST',
+                '/scheduler/pause',
+                headers={'Origin': f'http://127.0.0.1:{port}'},
+            )
+            resp = conn.getresponse()
+            resp.read()
+            self.assertEqual(resp.status, 303)
+            self.assertEqual(resp.getheader('Location'), '/')
+            self.assertEqual(toggled_actions, ['pause'])
+
+            # Subsequent GET / sees PAUSED state and renders Start button
+            conn.request('GET', '/')
+            resp = conn.getresponse()
+            html = resp.read().decode('utf-8')
+            self.assertEqual(resp.status, 200)
+            self.assertIn('/scheduler/resume', html)
+            self.assertEqual(call_counts['job'], 2)
+
+            conn.request('GET', '/healthz')
+            resp = conn.getresponse()
+            self.assertEqual(resp.status, 200)
+            resp.read()
             conn.close()
         finally:
             server.shutdown()
