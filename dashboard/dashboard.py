@@ -114,6 +114,13 @@ def _fetch_tesla_live(config: DashboardConfig) -> Tuple[Dict[str, Any], Dict[str
         else None
     )
 
+    total_pack_energy = live.get('total_pack_energy')
+    battery_count = (
+        max(1, round(float(total_pack_energy) / 13500.0))
+        if total_pack_energy and float(total_pack_energy) >= 9000.0
+        else None
+    )
+
     tesla_data: Dict[str, Any] = {
         'status': 'ok',
         'solar_power': solar_power,
@@ -123,6 +130,8 @@ def _fetch_tesla_live(config: DashboardConfig) -> Tuple[Dict[str, Any], Dict[str
         'grid_power': live.get('grid_power'),
         'grid_status': live.get('grid_status'),
         'percentage_charged': live.get('percentage_charged'),
+        'total_pack_energy': total_pack_energy,
+        'battery_count': battery_count,
         'storm_mode_active': live.get('storm_mode_active'),
         'timestamp': live.get('timestamp'),
     }
@@ -353,13 +362,24 @@ class StatusCollector:
         }
 
 
-def _format_watts(watts: Optional[float]) -> Tuple[str, str]:
+def _format_kw(watts: Optional[float]) -> str:
+    """Formats power in Tesla Energy style: '0 kW', '0.3 kW', '4.2 kW'."""
     if watts is None:
-        return '—', ''
-    val = float(watts)
-    if abs(val) >= 1000:
-        return f'{val / 1000:.2f} kW', f'{int(round(val)):,} W'
-    return f'{int(round(val)):,} W', ''
+        return '—'
+    kw = round(abs(float(watts)) / 1000.0, 1)
+    if kw == 0.0:
+        return '0 kW'
+    return f'{kw:.1f} kW'
+
+
+def _format_signed_kw(watts: Optional[float]) -> str:
+    if watts is None:
+        return '—'
+    kw = round(float(watts) / 1000.0, 1)
+    if kw == 0.0:
+        return '0 kW'
+    sign = '+' if kw > 0 else '−'
+    return f'{sign}{abs(kw):.1f} kW'
 
 
 def _format_relative_iso(iso_ts: Optional[str]) -> str:
@@ -457,59 +477,224 @@ def render_dashboard_html(
     else:
         overall_badge = '<span class="pill off-pill">Monitoring</span>'
 
-    # Tesla Energy section
+    # Tesla Energy hero diagram (Tesla app layout & labels)
     if tesla.get('status') == 'ok':
-        solar_main, solar_sub = _format_watts(tesla.get('solar_power'))
-        load_main, load_sub = _format_watts(tesla.get('load_power'))
-        excess_val = tesla.get('excess_power')
-        excess_main, excess_sub = _format_watts(excess_val)
-        if excess_val is None:
-            excess_cls, excess_note = '', ''
-        elif excess_val >= act_w:
-            excess_cls, excess_note = 'accent-green', f'≥ {act_w:,} W · Pool ready'
-        elif excess_val >= deact_w:
-            excess_cls, excess_note = 'accent-amber', 'Standby range'
-        else:
-            excess_cls, excess_note = 'accent-muted', f'< {deact_w:,} W · Low surplus'
+        solar_w = float(tesla.get('solar_power') or 0.0)
+        load_w = float(tesla.get('load_power') or 0.0)
+        batt_w = float(tesla.get('battery_power') or 0.0)
+        grid_w = float(tesla.get('grid_power') or 0.0)
+
+        solar_val = _format_kw(tesla.get('solar_power'))
+        home_val = _format_kw(tesla.get('load_power'))
+        grid_val = _format_kw(tesla.get('grid_power'))
 
         batt_pct = tesla.get('percentage_charged')
-        batt_display = f'{batt_pct:.0f}%' if batt_pct is not None else '—'
-        batt_width = min(100, max(0, float(batt_pct))) if batt_pct is not None else 0
-        grid_status = escape(str(tesla.get('grid_status') or ''))
-        batt_power = tesla.get('battery_power')
-        batt_flow = ''
-        if batt_power is not None:
-            bp_main, _ = _format_watts(abs(batt_power))
-            if batt_power < -50:
-                batt_flow = f'Charging {bp_main}'
-            elif batt_power > 50:
-                batt_flow = f'Discharging {bp_main}'
-            else:
-                batt_flow = 'Idle'
-        batt_sub = ' · '.join(p for p in [batt_flow, grid_status] if p)
+        batt_kw = _format_kw(tesla.get('battery_power'))
+        if batt_pct is not None:
+            powerwall_val = f'{batt_kw} · {batt_pct:.0f}%'
+        else:
+            powerwall_val = batt_kw
+
+        batt_count = tesla.get('battery_count')
+        powerwall_label = (
+            f'POWERWALL · {int(batt_count)}x' if batt_count and int(batt_count) > 1 else 'POWERWALL'
+        )
+
+        # Animated energy-flow overlay classes based on live power direction
+        solar_flow_svg = (
+            '<path class="flow-line flow-solar" d="M 272 222 L 280 232 L 280 264" />'
+            if solar_w > 50
+            else ''
+        )
+        home_flow_svg = (
+            '<path class="flow-line flow-home" d="M 289 278 L 368 262" />'
+            if load_w > 50
+            else ''
+        )
+        if batt_w < -50:
+            # Charging: Gateway -> Powerwall
+            batt_flow_svg = '<path class="flow-line flow-batt" d="M 271 281 L 204 295" />'
+        elif batt_w > 50:
+            # Discharging: Powerwall -> Gateway
+            batt_flow_svg = '<path class="flow-line flow-batt" d="M 204 295 L 271 281" />'
+        else:
+            batt_flow_svg = ''
+
+        if grid_w > 50:
+            # Importing: Grid -> Gateway
+            grid_flow_svg = '<path class="flow-line flow-grid" d="M 432 356 L 348 332 L 284 314 L 280 302" />'
+        elif grid_w < -50:
+            # Exporting: Gateway -> Grid
+            grid_flow_svg = '<path class="flow-line flow-grid" d="M 280 302 L 284 314 L 348 332 L 432 356" />'
+        else:
+            grid_flow_svg = ''
+
+        excess_val = tesla.get('excess_power')
+        excess_str = _format_signed_kw(excess_val)
+        if excess_val is None:
+            excess_badge_cls, excess_note = 'off-pill', 'Excess solar unavailable'
+        elif excess_val >= act_w:
+            excess_badge_cls, excess_note = 'on-pill', f'Excess {excess_str} · Pool ready'
+        elif excess_val >= deact_w:
+            excess_badge_cls, excess_note = 'warn-pill', f'Excess {excess_str} · Standby'
+        else:
+            excess_badge_cls, excess_note = 'off-pill', f'Excess {excess_str}'
+
+        grid_dir = ''
+        if grid_w > 50:
+            grid_dir = 'Importing from grid'
+        elif grid_w < -50:
+            grid_dir = 'Exporting to grid'
+        elif tesla.get('grid_status'):
+            grid_dir = str(tesla.get('grid_status'))
+
+        batt_dir = ''
+        if batt_w < -50:
+            batt_dir = 'Powerwall charging'
+        elif batt_w > 50:
+            batt_dir = 'Powerwall discharging'
+
+        sub_notes = ' · '.join(p for p in [batt_dir, grid_dir] if p)
 
         tesla_html = f"""
-        <div class="grid-4">
-          <div class="metric-card">
-            <div class="metric-label">Solar</div>
-            <div class="metric-value {'accent-amber' if (tesla.get('solar_power') or 0) > 50 else ''}">{escape(solar_main)}</div>
-            <div class="metric-sub">{escape(solar_sub or 'Live generation')}</div>
-          </div>
-          <div class="metric-card">
-            <div class="metric-label">Home Load</div>
-            <div class="metric-value">{escape(load_main)}</div>
-            <div class="metric-sub">{escape(load_sub or 'Current draw')}</div>
-          </div>
-          <div class="metric-card">
-            <div class="metric-label">Excess Power</div>
-            <div class="metric-value {excess_cls}">{escape(excess_main)}</div>
-            <div class="metric-sub">{escape(excess_note or excess_sub)}</div>
-          </div>
-          <div class="metric-card">
-            <div class="metric-label">Powerwall</div>
-            <div class="metric-value">{escape(batt_display)}</div>
-            <div class="bar-track"><div class="bar-fill" style="width: {batt_width:.1f}%"></div></div>
-            <div class="metric-sub">{escape(batt_sub or 'Battery charge')}</div>
+        <div class="energy-hero">
+          <svg class="energy-svg" viewBox="0 0 560 450" role="img" aria-label="Tesla Energy live power flow">
+            <defs>
+              <radialGradient id="sceneBg" cx="68%" cy="14%" r="85%">
+                <stop offset="0%" stop-color="#3a3d45" />
+                <stop offset="48%" stop-color="#1b1d22" />
+                <stop offset="100%" stop-color="#0c0d10" />
+              </radialGradient>
+              <linearGradient id="solarPanel" x1="0%" y1="0%" x2="100%" y2="100%">
+                <stop offset="0%" stop-color="#1a2232" />
+                <stop offset="100%" stop-color="#0f141e" />
+              </linearGradient>
+              <linearGradient id="roofEdge" x1="0%" y1="0%" x2="0%" y2="100%">
+                <stop offset="0%" stop-color="#2b2e35" />
+                <stop offset="100%" stop-color="#181a1f" />
+              </linearGradient>
+              <linearGradient id="wallFront" x1="0%" y1="0%" x2="100%" y2="100%">
+                <stop offset="0%" stop-color="#181a1f" />
+                <stop offset="100%" stop-color="#0c0d10" />
+              </linearGradient>
+              <linearGradient id="wallSide" x1="0%" y1="0%" x2="100%" y2="0%">
+                <stop offset="0%" stop-color="#101216" />
+                <stop offset="100%" stop-color="#1b1e24" />
+              </linearGradient>
+              <linearGradient id="pwBody" x1="0%" y1="0%" x2="100%" y2="100%">
+                <stop offset="0%" stop-color="#f3f4f6" />
+                <stop offset="100%" stop-color="#cbd5e1" />
+              </linearGradient>
+              <linearGradient id="winGlow" x1="0%" y1="0%" x2="0%" y2="100%">
+                <stop offset="0%" stop-color="#e5e7eb" />
+                <stop offset="100%" stop-color="#d4ccb8" />
+              </linearGradient>
+              <filter id="greenGlow" x="-50%" y="-20%" width="200%" height="140%">
+                <feGaussianBlur stdDeviation="2.5" result="blur" />
+                <feMerge>
+                  <feMergeNode in="blur" />
+                  <feMergeNode in="SourceGraphic" />
+                </feMerge>
+              </filter>
+            </defs>
+
+            <rect width="560" height="450" fill="url(#sceneBg)" />
+
+            <!-- Ground reflection shadow -->
+            <ellipse cx="275" cy="348" rx="215" ry="34" fill="#050608" opacity="0.72" />
+
+            <!-- Back upper roof + solar array -->
+            <polygon points="36,104 238,76 312,146 98,176" fill="url(#roofEdge)" stroke="#2e3139" stroke-width="1" />
+            <polygon points="48,110 232,84 294,142 104,168" fill="url(#solarPanel)" stroke="#283144" stroke-width="1" />
+            <g stroke="#283144" stroke-width="0.9" opacity="0.75">
+              <line x1="94" y1="103" x2="152" y2="161" />
+              <line x1="140" y1="97" x2="199" y2="155" />
+              <line x1="186" y1="90" x2="246" y2="148" />
+              <line x1="68" y1="129" x2="253" y2="103" />
+              <line x1="86" y1="149" x2="274" y2="122" />
+            </g>
+
+            <!-- House left gable + garage wall -->
+            <polygon points="36,192 98,154 176,236 176,342 36,288" fill="url(#wallSide)" stroke="#20232b" stroke-width="1" />
+            <!-- Garage door slats -->
+            <polygon points="52,238 148,274 148,328 52,290" fill="#14161b" stroke="#252831" stroke-width="1" />
+            <g stroke="#20232b" stroke-width="1">
+              <line x1="52" y1="251" x2="148" y2="287" />
+              <line x1="52" y1="264" x2="148" y2="300" />
+              <line x1="52" y1="277" x2="148" y2="313" />
+            </g>
+
+            <!-- House front right wall -->
+            <polygon points="176,236 456,198 456,296 176,342" fill="url(#wallFront)" stroke="#22252d" stroke-width="1" />
+
+            <!-- Front main roof + solar array -->
+            <polygon points="94,154 366,118 468,198 176,238" fill="url(#roofEdge)" stroke="#323640" stroke-width="1" />
+            <polygon points="122,163 356,131 440,196 190,230" fill="url(#solarPanel)" stroke="#2a3447" stroke-width="1" />
+            <!-- Solar panel grid -->
+            <g stroke="#2b364a" stroke-width="1" opacity="0.85">
+              <line x1="168" y1="157" x2="238" y2="223" />
+              <line x1="215" y1="150" x2="288" y2="216" />
+              <line x1="262" y1="144" x2="338" y2="209" />
+              <line x1="309" y1="138" x2="389" y2="203" />
+              <line x1="145" y1="185" x2="384" y2="152" />
+              <line x1="167" y1="208" x2="412" y2="174" />
+            </g>
+
+            <!-- Lit 4-pane window on right -->
+            <polygon points="370,242 436,233 436,286 370,296" fill="#0b0c0f" stroke="#2d313a" stroke-width="1.5" />
+            <polygon points="374,246 401,242 401,266 374,270" fill="url(#winGlow)" />
+            <polygon points="405,241 432,237 432,261 405,265" fill="url(#winGlow)" />
+            <polygon points="374,274 401,270 401,291 374,295" fill="url(#winGlow)" opacity="0.92" />
+            <polygon points="405,269 432,265 432,286 405,290" fill="url(#winGlow)" opacity="0.92" />
+
+            <!-- Static conduit lines -->
+            <g fill="none" stroke="#2c303a" stroke-width="4" stroke-linecap="round" stroke-linejoin="round">
+              <path d="M 272 222 L 280 232 L 280 264" />
+              <path d="M 289 278 L 368 262" />
+              <path d="M 204 295 L 271 281" />
+              <path d="M 280 302 L 284 314 L 348 332 L 432 356" />
+            </g>
+
+            <!-- Active directional energy flow lines -->
+            {solar_flow_svg}
+            {home_flow_svg}
+            {batt_flow_svg}
+            {grid_flow_svg}
+
+            <!-- Center Backup Gateway box -->
+            <rect x="272" y="264" width="16" height="38" rx="2.5" fill="#4b505c" stroke="#646a78" stroke-width="1" />
+            <circle cx="280" cy="292" r="2.6" fill="#cbd5e1" />
+
+            <!-- Powerwall unit on front-left wall -->
+            <polygon points="175,286 181,284 181,341 175,342" fill="#22c55e" filter="url(#greenGlow)" />
+            <polygon points="181,284 209,280 209,336 181,341" fill="url(#pwBody)" />
+            <polygon points="175,286 203,282 209,280 181,284" fill="#ffffff" />
+            <line x1="181" y1="297" x2="209" y2="293" stroke="#94a3b8" stroke-width="1" />
+            <text x="195" y="309" text-anchor="middle" fill="#64748b" font-size="4.6" font-weight="700" letter-spacing="1.2">TESLA</text>
+
+            <!-- Leader line: SOLAR (top-left) -->
+            <line x1="215" y1="68" x2="215" y2="184" stroke="#9ca3af" stroke-width="1" opacity="0.7" />
+            <text x="215" y="35" text-anchor="middle" class="svg-label">SOLAR</text>
+            <text x="215" y="61" text-anchor="middle" class="svg-value">{escape(solar_val)}</text>
+
+            <!-- Leader line: HOME (top-right) -->
+            <line x1="406" y1="126" x2="406" y2="254" stroke="#9ca3af" stroke-width="1" opacity="0.7" />
+            <text x="406" y="92" text-anchor="middle" class="svg-label">HOME</text>
+            <text x="406" y="118" text-anchor="middle" class="svg-value">{escape(home_val)}</text>
+
+            <!-- Leader line: POWERWALL (bottom-left) -->
+            <line x1="194" y1="344" x2="194" y2="375" stroke="#9ca3af" stroke-width="1" opacity="0.7" />
+            <text x="194" y="395" text-anchor="middle" class="svg-label">{escape(powerwall_label)}</text>
+            <text x="194" y="423" text-anchor="middle" class="svg-value">{escape(powerwall_val)}</text>
+
+            <!-- Leader line: GRID (bottom-right) -->
+            <line x1="418" y1="358" x2="418" y2="375" stroke="#9ca3af" stroke-width="1" opacity="0.7" />
+            <text x="418" y="395" text-anchor="middle" class="svg-label">GRID</text>
+            <text x="418" y="423" text-anchor="middle" class="svg-value">{escape(grid_val)}</text>
+          </svg>
+          <div class="hero-footer">
+            <span class="pill {excess_badge_cls}">{escape(excess_note)}</span>
+            <span class="hero-sub">{escape(sub_notes)}</span>
           </div>
         </div>
         """
@@ -611,36 +796,18 @@ def render_dashboard_html(
   <title>Pool on Solar — Live Status</title>
   <style>
     :root {{
-      --bg: #f8fafc;
-      --card: #ffffff;
-      --border: #e2e8f0;
-      --text: #0f172a;
-      --muted: #64748b;
-      --green: #15803d;
-      --green-bg: #dcfce7;
-      --amber: #b45309;
-      --amber-bg: #fef3c7;
-      --red: #b91c1c;
-      --red-bg: #fee2e2;
-      --off-bg: #f1f5f9;
-      --bar-bg: #e2e8f0;
-    }}
-    @media (prefers-color-scheme: dark) {{
-      :root {{
-        --bg: #0b1120;
-        --card: #111827;
-        --border: #1f2937;
-        --text: #f1f5f9;
-        --muted: #94a3b8;
-        --green: #4ade80;
-        --green-bg: #052e16;
-        --amber: #fbbf24;
-        --amber-bg: #451a03;
-        --red: #f87171;
-        --red-bg: #450a0a;
-        --off-bg: #1e293b;
-        --bar-bg: #1e293b;
-      }}
+      --bg: #0c0d10;
+      --card: #15171d;
+      --border: #252832;
+      --text: #f3f4f6;
+      --muted: #9ca3af;
+      --green: #4ade80;
+      --green-bg: #052e16;
+      --amber: #fbbf24;
+      --amber-bg: #451a03;
+      --red: #f87171;
+      --red-bg: #450a0a;
+      --off-bg: #1e222b;
     }}
     * {{ box-sizing: border-box; }}
     body {{
@@ -651,42 +818,88 @@ def render_dashboard_html(
       color: var(--text);
       line-height: 1.45;
     }}
-    .container {{ max-width: 860px; margin: 0 auto; }}
+    .container {{ max-width: 760px; margin: 0 auto; }}
     header {{
       display: flex;
       flex-wrap: wrap;
       align-items: center;
       justify-content: space-between;
       gap: 0.75rem;
-      margin-bottom: 1.5rem;
+      margin-bottom: 1.25rem;
     }}
     .title-group {{ display: flex; align-items: center; gap: 0.75rem; }}
-    h1 {{ margin: 0; font-size: 1.5rem; letter-spacing: -0.02em; }}
+    h1 {{ margin: 0; font-size: 1.4rem; font-weight: 600; letter-spacing: -0.02em; }}
     h2 {{
-      font-size: 0.85rem;
+      font-size: 0.78rem;
       text-transform: uppercase;
-      letter-spacing: 0.06em;
+      letter-spacing: 0.08em;
       color: var(--muted);
-      margin: 1.5rem 0 0.75rem;
+      margin: 1.5rem 0 0.7rem;
+      font-weight: 600;
     }}
-    .meta {{ display: flex; align-items: center; gap: 0.6rem; font-size: 0.85rem; color: var(--muted); }}
+    .meta {{ display: flex; align-items: center; gap: 0.6rem; font-size: 0.82rem; color: var(--muted); }}
     .refresh-btn {{
       display: inline-block;
       padding: 0.35rem 0.7rem;
-      border-radius: 6px;
+      border-radius: 8px;
       border: 1px solid var(--border);
       background: var(--card);
       color: var(--text);
       text-decoration: none;
-      font-size: 0.82rem;
+      font-size: 0.8rem;
       font-weight: 500;
     }}
-    .refresh-btn:hover {{ opacity: 0.85; }}
-    .grid-4 {{
-      display: grid;
-      grid-template-columns: repeat(auto-fit, minmax(175px, 1fr));
-      gap: 0.85rem;
+    .refresh-btn:hover {{ background: #1e212a; }}
+    .energy-hero {{
+      background: #0c0d10;
+      border: 1px solid var(--border);
+      border-radius: 18px;
+      overflow: hidden;
     }}
+    .energy-svg {{
+      display: block;
+      width: 100%;
+      height: auto;
+    }}
+    .svg-label {{
+      fill: #9ca3af;
+      font-size: 13px;
+      font-weight: 500;
+      letter-spacing: 0.09em;
+    }}
+    .svg-value {{
+      fill: #f8fafc;
+      font-size: 23px;
+      font-weight: 600;
+      letter-spacing: -0.01em;
+    }}
+    .flow-line {{
+      fill: none;
+      stroke-width: 3.5;
+      stroke-linecap: round;
+      stroke-linejoin: round;
+      stroke-dasharray: 18 26;
+      animation: energyFlow 1.6s linear infinite;
+    }}
+    .flow-solar {{ stroke: #eab308; }}
+    .flow-home {{ stroke: #facc15; }}
+    .flow-batt {{ stroke: #22c55e; }}
+    .flow-grid {{ stroke: #94a3b8; }}
+    @keyframes energyFlow {{
+      from {{ stroke-dashoffset: 44; }}
+      to {{ stroke-dashoffset: 0; }}
+    }}
+    .hero-footer {{
+      display: flex;
+      flex-wrap: wrap;
+      align-items: center;
+      justify-content: space-between;
+      gap: 0.5rem;
+      padding: 0.75rem 1.1rem;
+      background: var(--card);
+      border-top: 1px solid var(--border);
+    }}
+    .hero-sub {{ font-size: 0.8rem; color: var(--muted); }}
     .grid-2 {{
       display: grid;
       grid-template-columns: repeat(auto-fit, minmax(260px, 1fr));
@@ -694,34 +907,16 @@ def render_dashboard_html(
     }}
     .grid-3 {{
       display: grid;
-      grid-template-columns: repeat(auto-fit, minmax(220px, 1fr));
+      grid-template-columns: repeat(auto-fit, minmax(210px, 1fr));
       gap: 0.85rem;
     }}
-    .card, .metric-card {{
+    .card {{
       background: var(--card);
       border: 1px solid var(--border);
-      border-radius: 12px;
+      border-radius: 14px;
       padding: 1rem 1.1rem;
     }}
-    .metric-label {{ font-size: 0.82rem; color: var(--muted); font-weight: 500; }}
-    .metric-value {{ font-size: 1.65rem; font-weight: 700; margin: 0.25rem 0 0.2rem; letter-spacing: -0.02em; }}
-    .metric-sub {{ font-size: 0.8rem; color: var(--muted); }}
-    .accent-green {{ color: var(--green); }}
-    .accent-amber {{ color: var(--amber); }}
-    .accent-muted {{ color: var(--muted); }}
-    .bar-track {{
-      height: 6px;
-      border-radius: 999px;
-      background: var(--bar-bg);
-      overflow: hidden;
-      margin: 0.45rem 0 0.35rem;
-    }}
-    .bar-fill {{
-      height: 100%;
-      background: var(--green);
-      border-radius: 999px;
-    }}
-    .card-title {{ font-size: 0.9rem; font-weight: 600; margin-bottom: 0.65rem; }}
+    .card-title {{ font-size: 0.88rem; font-weight: 600; margin-bottom: 0.65rem; }}
     .device-row {{
       display: flex;
       align-items: center;
@@ -730,12 +925,12 @@ def render_dashboard_html(
       border-top: 1px solid var(--border);
     }}
     .device-row:first-of-type {{ border-top: 0; padding-top: 0.1rem; }}
-    .device-name {{ font-size: 0.95rem; }}
+    .device-name {{ font-size: 0.92rem; }}
     .pill {{
       display: inline-block;
-      padding: 0.15rem 0.55rem;
+      padding: 0.16rem 0.58rem;
       border-radius: 999px;
-      font-size: 0.75rem;
+      font-size: 0.74rem;
       font-weight: 600;
       letter-spacing: 0.02em;
     }}
@@ -750,7 +945,7 @@ def render_dashboard_html(
       border: 1px solid var(--border);
       border-radius: 999px;
       padding: 0.25rem 0.7rem;
-      font-size: 0.82rem;
+      font-size: 0.8rem;
       color: var(--muted);
       font-weight: 500;
     }}
@@ -759,30 +954,17 @@ def render_dashboard_html(
     .health-detail {{ font-size: 0.82rem; color: var(--muted); }}
     .error-box {{ color: var(--red); font-size: 0.9rem; }}
     code {{ font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: 0.85em; }}
-    .btn {{
-      display: inline-block;
-      padding: 0.5rem 0.9rem;
-      background: var(--text);
-      color: var(--bg);
-      text-decoration: none;
-      border-radius: 6px;
-      border: 0;
-      cursor: pointer;
-      font-size: 0.9rem;
-      margin-right: 0.5rem;
-    }}
-    .btn.secondary {{ background: var(--muted); color: #fff; }}
     .toggle-btn {{
       width: 100%;
       padding: 0.45rem 0.75rem;
       border-radius: 8px;
-      border: 1px solid var(--border);
+      border: 1px solid transparent;
       font-size: 0.82rem;
       font-weight: 600;
       cursor: pointer;
     }}
-    .pause-btn {{ background: var(--amber-bg); color: var(--amber); border-color: transparent; }}
-    .resume-btn {{ background: var(--green-bg); color: var(--green); border-color: transparent; }}
+    .pause-btn {{ background: var(--amber-bg); color: var(--amber); }}
+    .resume-btn {{ background: var(--green-bg); color: var(--green); }}
     .toggle-btn:hover {{ opacity: 0.88; }}
     .muted {{ color: var(--muted); font-size: 0.85rem; }}
   </style>
@@ -800,7 +982,6 @@ def render_dashboard_html(
       </div>
     </header>
 
-    <h2>Tesla Energy</h2>
     {tesla_html}
 
     <h2>Pool &amp; Lights</h2>

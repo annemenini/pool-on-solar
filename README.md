@@ -9,7 +9,7 @@ Automate the activation / deactivation of a pool cleaning system and lights so t
 | [automation/](automation/) | Job (`pool-on-solar`) | Scheduled every 15 min: reads live Tesla Energy status and controls iAquaLink pool pumps and lights. |
 | [tesla/analysis/](tesla/analysis/) | Job (`pool-on-solar-analysis`) | Scheduled daily: loads yesterday's Tesla power and energy history into BigQuery. |
 | [tesla/authentication/](tesla/authentication/) | Service (`tesla-oauth`) | Hosts `/.well-known/appspecific/com.tesla.3p.public-key.pem` and handles one-time partner registration + OAuth login (`--max-instances=1`). |
-| [dashboard/](dashboard/) | Service (`pool-on-solar-dashboard`) | Monitoring UI behind IAP (`pool.steren.fr`) showing live Tesla Energy stats, iAquaLink device states, job/scheduler/token health (60s TTL cache), and a Pause/Start Schedule control. |
+| [dashboard/](dashboard/) | Service (`pool-on-solar-dashboard`) | Monitoring UI behind IAP (`hilo.steren.fr`) showing live Tesla Energy stats, iAquaLink device states, job/scheduler/token health (60s TTL cache), and a Pause/Start Schedule control. |
 
 ## Requirements
 
@@ -155,11 +155,11 @@ This project authenticates via the **Tesla Fleet API** and persists rotating OAu
        --region=us-west1
      ```
 
-4. **Map a custom domain** (e.g. `pool.steren.fr`):
+4. **Map a custom domain** (e.g. `hilo.steren.fr`):
    ```bash
    gcloud beta run domain-mappings create \
      --service=pool-on-solar-dashboard \
-     --domain=pool.steren.fr \
+     --domain=hilo.steren.fr \
      --region=us-west1
    ```
    Add the printed DNS record (`CNAME` pointing to `ghs.googlehosted.com.`) at your DNS registrar.

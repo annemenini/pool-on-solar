@@ -719,6 +719,7 @@ class DashboardServerTests(unittest.TestCase):
                     'grid_power': 0,
                     'grid_status': 'Active',
                     'percentage_charged': 88.0,
+                    'battery_count': 2,
                 },
                 {'status': 'ok', 'expires_in_seconds': 7200},
             )
@@ -777,14 +778,20 @@ class DashboardServerTests(unittest.TestCase):
         try:
             conn = HTTPConnection('127.0.0.1', port)
 
-            # First GET / populates cache and renders Pause button when ENABLED
+            # First GET / populates cache and renders Tesla app layout + Pause button when ENABLED
             conn.request('GET', '/')
             resp = conn.getresponse()
             html = resp.read().decode('utf-8')
             self.assertEqual(resp.status, 200)
-            self.assertIn('4.20 kW', html)
+            self.assertIn('SOLAR', html)
+            self.assertIn('4.2 kW', html)
+            self.assertIn('HOME', html)
+            self.assertIn('1.5 kW', html)
+            self.assertIn('POWERWALL · 2x', html)
+            self.assertIn('1.2 kW · 88%', html)
+            self.assertIn('GRID', html)
+            self.assertIn('0 kW', html)
             self.assertIn('Filter Pump', html)
-            self.assertIn('88%', html)
             self.assertIn('Succeeded', html)
             self.assertIn('Runs every 15 minutes', html)
             self.assertNotIn('*/15 * * * *', html)
