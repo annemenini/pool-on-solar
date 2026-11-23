@@ -1,0 +1,13 @@
+[project]
+name = "pool-on-solar"
+version = "2.0.0"
+description = "Automate Jandy iAquaLink pool pumps and lights from Tesla Energy solar surplus on Vercel."
+requires-python = ">=3.14"
+dependencies = [
+    "google-cloud-bigquery>=3.25.0",
+    "httpx[http2]>=0.27.0",
+    "iaqualink>=0.7.0",
+    "pytz",
+    "suntime",
+    "vercel>=0.4.0",
+]

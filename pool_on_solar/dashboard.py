@@ -1,10 +1,9 @@
-"""Read-only status collector (with TTL cache) and HTML renderer for Pool on Solar."""
+"""Live status collector (backed by Vercel Runtime Cache) and Tesla Energy SVG dashboard renderer."""
 
 from __future__ import annotations
 
 import asyncio
 from concurrent.futures import ThreadPoolExecutor
-from dataclasses import dataclass, field
 import datetime
 from html import escape
 import os
@@ -12,99 +11,37 @@ import threading
 import time
 from typing import Any, Callable, Dict, List, Optional, Tuple
 
-import httpx
+from pool_on_solar.cache import AppCache, MemoryCache
+from pool_on_solar.config import AppConfig
+from pool_on_solar.storage import StateStore
+from pool_on_solar.tesla_fleet import TeslaFleetClient
+from pool_on_solar.vercel_schedules import VercelSchedulesClient
 
-from tesla_fleet import (
-    DEFAULT_API_BASE_URL,
-    TeslaFleetClient,
-    create_token_store,
-)
-
-
-def _split_csv(value: str) -> List[str]:
-    return [item.strip() for item in value.split(',') if item.strip()]
+DASHBOARD_SNAPSHOT_CACHE_KEY = 'dashboard:snapshot'
+DASHBOARD_STATUS_TAG = 'dashboard-status'
+AUTOMATION_LAST_RUN_CACHE_KEY = 'automation:last-run'
 
 
-@dataclass
-class DashboardConfig:
-    tesla_client_id: str = ''
-    tesla_token_secret_name: str = ''
-    tesla_token_file: str = ''
-    tesla_api_base_url: str = DEFAULT_API_BASE_URL
-    energy_site_id: str = ''
-    iaqualink_user_id: str = ''
-    iaqualink_password: str = ''
-    pool_devices: List[str] = field(default_factory=lambda: ['pool_pump', 'aux_1'])
-    light_devices: List[str] = field(default_factory=lambda: ['aux_B1', 'aux_B3', 'aux_B4'])
-    activation_excess_power: int = 2000
-    deactivation_excess_power: int = 500
-    gcp_project_id: str = ''
-    cloud_run_region: str = 'us-west1'
-    cloud_run_job_name: str = 'pool-on-solar'
-    scheduler_job_name: str = 'pool-on-solar-scheduler-trigger'
-    cache_ttl_seconds: int = 60
-
-    @classmethod
-    def from_env(cls) -> 'DashboardConfig':
-        project_id = (
-            os.getenv('GCP_PROJECT_ID')
-            or os.getenv('GOOGLE_CLOUD_PROJECT')
-            or os.getenv('GCP_PROJECT')
-            or ''
-        )
-        token_secret = os.getenv('TESLA_TOKEN_SECRET_NAME', '')
-        if not project_id and token_secret.startswith('projects/'):
-            parts = token_secret.split('/')
-            if len(parts) >= 2:
-                project_id = parts[1]
-
-        return cls(
-            tesla_client_id=os.getenv('TESLA_CLIENT_ID', ''),
-            tesla_token_secret_name=token_secret,
-            tesla_token_file=os.getenv('TESLA_TOKEN_FILE', ''),
-            tesla_api_base_url=os.getenv('TESLA_API_BASE_URL', DEFAULT_API_BASE_URL),
-            energy_site_id=os.getenv('ENERGY_SITE_ID', ''),
-            iaqualink_user_id=os.getenv('IAQUALINK_USER_ID', ''),
-            iaqualink_password=os.getenv('IAQUALINK_PASSWORD', ''),
-            pool_devices=_split_csv(os.getenv('POOL_DEVICES', 'pool_pump,aux_1')),
-            light_devices=_split_csv(os.getenv('LIGHT_DEVICES', 'aux_B1,aux_B3,aux_B4')),
-            activation_excess_power=int(os.getenv('ACTIVATION_EXCESS_POWER', '2000')),
-            deactivation_excess_power=int(os.getenv('DEACTIVATION_EXCESS_POWER', '500')),
-            gcp_project_id=project_id,
-            cloud_run_region=os.getenv('CLOUD_RUN_REGION', 'us-west1'),
-            cloud_run_job_name=os.getenv('CLOUD_RUN_JOB_NAME', 'pool-on-solar'),
-            scheduler_job_name=os.getenv(
-                'SCHEDULER_JOB_NAME', 'pool-on-solar-scheduler-trigger'
-            ),
-            cache_ttl_seconds=max(5, int(os.getenv('STATUS_CACHE_TTL_SECONDS', '60'))),
-        )
-
-
-def _fetch_tesla_live(config: DashboardConfig) -> Tuple[Dict[str, Any], Dict[str, Any]]:
-    """Fetches live Tesla Energy metrics and non-sensitive OAuth token health."""
-    if not config.tesla_client_id:
+def _fetch_tesla_live(
+    config: AppConfig,
+    state_store: StateStore,
+    cache: Optional[AppCache] = None,
+) -> Tuple[Dict[str, Any], Dict[str, Any]]:
+    if not config.tesla.client_id:
         return (
             {'status': 'unconfigured', 'error': 'TESLA_CLIENT_ID not configured'},
             {'status': 'unconfigured'},
         )
-    if not config.tesla_token_secret_name and not config.tesla_token_file:
-        return (
-            {'status': 'unconfigured', 'error': 'Tesla token store not configured'},
-            {'status': 'unconfigured'},
-        )
 
-    token_store = create_token_store(
-        secret_name=config.tesla_token_secret_name or None,
-        cache_file=config.tesla_token_file or None,
-    )
     with TeslaFleetClient(
-        client_id=config.tesla_client_id,
-        token_store=token_store,
-        api_base_url=config.tesla_api_base_url,
+        client_id=config.tesla.client_id,
+        state_store=state_store,
+        api_base_url=config.tesla.api_base_url,
+        cache=cache,
     ) as client:
-        site_id = config.energy_site_id or client.get_energy_site_id()
+        site_id = config.tesla.energy_site_id or client.get_energy_site_id()
         live = client.get_live_status(site_id)
-        token = client._token
+        token = client.current_token
 
     solar_power = live.get('solar_power')
     load_power = live.get('load_power')
@@ -136,7 +73,7 @@ def _fetch_tesla_live(config: DashboardConfig) -> Tuple[Dict[str, Any], Dict[str
         'timestamp': live.get('timestamp'),
     }
 
-    token_health: Dict[str, Any] = {'status': 'ok'}
+    token_health: Dict[str, Any] = {'status': 'ok', 'storage': state_store.backend_name}
     if token is not None:
         seconds_left = max(0, int(token.expires_at - time.time()))
         token_health['expires_in_seconds'] = seconds_left
@@ -147,10 +84,10 @@ def _fetch_tesla_live(config: DashboardConfig) -> Tuple[Dict[str, Any], Dict[str
     return tesla_data, token_health
 
 
-async def _fetch_iaqualink_async(config: DashboardConfig) -> Dict[str, Any]:
+async def _fetch_iaqualink_async(config: AppConfig) -> Dict[str, Any]:
     from iaqualink.client import AqualinkClient
 
-    async with AqualinkClient(config.iaqualink_user_id, config.iaqualink_password) as client:
+    async with AqualinkClient(config.iaqualink.user_id, config.iaqualink.password) as client:
         systems = await client.get_systems()
         if not systems:
             return {'status': 'error', 'error': 'No iAquaLink systems found'}
@@ -178,153 +115,111 @@ async def _fetch_iaqualink_async(config: DashboardConfig) -> Dict[str, Any]:
     return {
         'status': 'ok',
         'system_name': getattr(system, 'name', None) or 'iAquaLink',
-        'pool': [_serialize_device(k) for k in config.pool_devices],
-        'lights': [_serialize_device(k) for k in config.light_devices],
+        'pool': [_serialize_device(k) for k in config.iaqualink.pool.devices],
+        'lights': [_serialize_device(k) for k in config.iaqualink.light.devices],
         'temperatures': temps,
     }
 
 
-def _fetch_iaqualink(config: DashboardConfig) -> Dict[str, Any]:
-    if not config.iaqualink_user_id or not config.iaqualink_password:
+def _fetch_iaqualink(config: AppConfig) -> Dict[str, Any]:
+    if not config.iaqualink.user_id or not config.iaqualink.password:
         return {'status': 'unconfigured', 'error': 'iAquaLink credentials not configured'}
     return asyncio.run(_fetch_iaqualink_async(config))
 
 
-def _fetch_gcp_job_health(config: DashboardConfig) -> Dict[str, Any]:
-    if not config.gcp_project_id:
-        return {'status': 'unconfigured', 'error': 'GCP project ID not configured'}
-
-    import google.auth
-    from google.auth.transport.requests import Request
-
-    creds, _ = google.auth.default(scopes=['https://www.googleapis.com/auth/cloud-platform'])
-    creds.refresh(Request())
-    headers = {'Authorization': f'Bearer {creds.token}'}
-
-    result: Dict[str, Any] = {'status': 'ok'}
-    with httpx.Client(timeout=15.0) as http:
-        if config.cloud_run_job_name:
-            job_url = (
-                f'https://run.googleapis.com/v2/projects/{config.gcp_project_id}'
-                f'/locations/{config.cloud_run_region}/jobs/{config.cloud_run_job_name}'
-            )
-            resp = http.get(job_url, headers=headers)
-            if resp.status_code == 200:
-                job_json = resp.json()
-                latest = job_json.get('latestCreatedExecution') or {}
-                exec_name = str(latest.get('name', '')).split('/')[-1] or None
-                completion_status = latest.get('completionStatus')
-                result['cloud_run_job'] = {
-                    'name': config.cloud_run_job_name,
-                    'execution': exec_name,
-                    'completion_status': completion_status,
-                    'create_time': latest.get('createTime'),
-                    'completion_time': latest.get('completionTime'),
-                    'execution_count': job_json.get('executionCount'),
-                }
-            else:
-                result['cloud_run_job'] = {
-                    'name': config.cloud_run_job_name,
-                    'error': f'HTTP {resp.status_code}',
-                }
-
-        if config.scheduler_job_name:
-            sched_url = (
-                f'https://cloudscheduler.googleapis.com/v1/projects/{config.gcp_project_id}'
-                f'/locations/{config.cloud_run_region}/jobs/{config.scheduler_job_name}'
-            )
-            resp = http.get(sched_url, headers=headers)
-            if resp.status_code == 200:
-                sched_json = resp.json()
-                result['scheduler'] = {
-                    'name': config.scheduler_job_name,
-                    'state': sched_json.get('state'),
-                    'schedule': sched_json.get('schedule'),
-                    'last_attempt_time': sched_json.get('lastAttemptTime'),
-                }
-            else:
-                result['scheduler'] = {
-                    'name': config.scheduler_job_name,
-                    'error': f'HTTP {resp.status_code}',
-                }
-
-    return result
+def _fetch_schedule_health(
+    config: AppConfig,
+    oidc_token: Optional[str] = None,
+) -> Dict[str, Any]:
+    schedule_name = os.getenv('VERCEL_SCHEDULE_NAME', 'pool-on-solar')
+    client = VercelSchedulesClient(schedule_name=schedule_name, oidc_token=oidc_token)
+    return client.get_health(fallback_cron=config.schedule_cron)
 
 
-def toggle_gcp_scheduler_job(config: DashboardConfig, action: str) -> Dict[str, Any]:
-    """Pauses or resumes the Cloud Scheduler job via the Cloud Scheduler v1 REST API."""
+def _toggle_vercel_schedule(
+    config: AppConfig,
+    action: str,
+    oidc_token: Optional[str] = None,
+) -> Dict[str, Any]:
     if action not in {'pause', 'resume'}:
         raise ValueError(f'Invalid scheduler action: {action}')
-    if not config.gcp_project_id or not config.scheduler_job_name:
-        raise ValueError('GCP_PROJECT_ID and SCHEDULER_JOB_NAME must be configured.')
-
-    import google.auth
-    from google.auth.transport.requests import Request
-
-    creds, _ = google.auth.default(scopes=['https://www.googleapis.com/auth/cloud-platform'])
-    creds.refresh(Request())
-    headers = {'Authorization': f'Bearer {creds.token}'}
-
-    url = (
-        f'https://cloudscheduler.googleapis.com/v1/projects/{config.gcp_project_id}'
-        f'/locations/{config.cloud_run_region}/jobs/{config.scheduler_job_name}:{action}'
-    )
-    with httpx.Client(timeout=15.0) as http:
-        resp = http.post(url, headers=headers, json={})
-    if resp.status_code >= 400:
-        raise RuntimeError(
-            f'Cloud Scheduler {action} failed ({resp.status_code}): {resp.text}'
-        )
-    return resp.json()
+    schedule_name = os.getenv('VERCEL_SCHEDULE_NAME', 'pool-on-solar')
+    client = VercelSchedulesClient(schedule_name=schedule_name, oidc_token=oidc_token)
+    return client.disable() if action == 'pause' else client.enable()
 
 
 class StatusCollector:
-    """Thread-safe TTL-cached collector for Tesla, iAquaLink, and Cloud Run job health."""
+    """Thread-safe collector backed by Vercel Runtime Cache for Tesla, iAquaLink, and Schedules."""
 
     def __init__(
         self,
-        config: DashboardConfig,
-        tesla_fetcher: Optional[Callable[[DashboardConfig], Tuple[Dict[str, Any], Dict[str, Any]]]] = None,
-        iaqualink_fetcher: Optional[Callable[[DashboardConfig], Dict[str, Any]]] = None,
-        job_health_fetcher: Optional[Callable[[DashboardConfig], Dict[str, Any]]] = None,
-        scheduler_toggler: Optional[Callable[[DashboardConfig, str], Dict[str, Any]]] = None,
+        config: AppConfig,
+        state_store: StateStore,
+        cache: Optional[AppCache] = None,
+        tesla_fetcher: Optional[
+            Callable[..., Tuple[Dict[str, Any], Dict[str, Any]]]
+        ] = None,
+        iaqualink_fetcher: Optional[Callable[[AppConfig], Dict[str, Any]]] = None,
+        job_health_fetcher: Optional[
+            Callable[[AppConfig, Optional[str]], Dict[str, Any]]
+        ] = None,
+        scheduler_toggler: Optional[
+            Callable[[AppConfig, str, Optional[str]], Dict[str, Any]]
+        ] = None,
     ) -> None:
         self._config = config
+        self._state_store = state_store
+        self._cache: AppCache = cache or MemoryCache()
+        self._custom_tesla_fetcher = tesla_fetcher is not None
         self._tesla_fetcher = tesla_fetcher or _fetch_tesla_live
         self._iaqualink_fetcher = iaqualink_fetcher or _fetch_iaqualink
-        self._job_health_fetcher = job_health_fetcher or _fetch_gcp_job_health
-        self._scheduler_toggler = scheduler_toggler or toggle_gcp_scheduler_job
+        self._job_health_fetcher = job_health_fetcher or _fetch_schedule_health
+        self._scheduler_toggler = scheduler_toggler or _toggle_vercel_schedule
         self._lock = threading.Lock()
-        self._cached_snapshot: Optional[Dict[str, Any]] = None
-        self._cached_at: float = 0.0
 
-    def toggle_scheduler(self, action: str) -> Dict[str, Any]:
-        result = self._scheduler_toggler(self._config, action)
-        with self._lock:
-            self._cached_snapshot = None
-            self._cached_at = 0.0
+    def toggle_scheduler(
+        self,
+        action: str,
+        oidc_token: Optional[str] = None,
+    ) -> Dict[str, Any]:
+        result = self._scheduler_toggler(self._config, action, oidc_token)
+        self._cache.expire_tag(DASHBOARD_STATUS_TAG)
         return result
 
-    def get_snapshot(self, force_refresh: bool = False) -> Dict[str, Any]:
+    def get_snapshot(
+        self,
+        force_refresh: bool = False,
+        oidc_token: Optional[str] = None,
+    ) -> Dict[str, Any]:
         with self._lock:
             now = time.time()
-            if (
-                not force_refresh
-                and self._cached_snapshot is not None
-                and (now - self._cached_at) < self._config.cache_ttl_seconds
-            ):
-                age = int(now - self._cached_at)
-                return {**self._cached_snapshot, 'cached': True, 'age_seconds': age}
+            if not force_refresh:
+                cached_entry = self._cache.get(DASHBOARD_SNAPSHOT_CACHE_KEY)
+                if (
+                    isinstance(cached_entry, dict)
+                    and isinstance(cached_entry.get('snapshot'), dict)
+                ):
+                    cached_at = float(cached_entry.get('cached_at', now))
+                    age = max(0, int(now - cached_at))
+                    if age < self._config.cache_ttl_seconds:
+                        return {**cached_entry['snapshot'], 'cached': True, 'age_seconds': age}
 
-            snapshot = self._collect_uncached()
-            self._cached_snapshot = snapshot
-            self._cached_at = time.time()
+            snapshot = self._collect_uncached(oidc_token=oidc_token)
+            self._cache.set(
+                DASHBOARD_SNAPSHOT_CACHE_KEY,
+                {'snapshot': snapshot, 'cached_at': time.time()},
+                ttl=self._config.cache_ttl_seconds,
+                tags=[DASHBOARD_STATUS_TAG],
+                name='dashboard-snapshot',
+            )
             return {**snapshot, 'cached': False, 'age_seconds': 0}
 
-    def _collect_uncached(self) -> Dict[str, Any]:
+    def _collect_uncached(self, oidc_token: Optional[str] = None) -> Dict[str, Any]:
         def safe_tesla() -> Tuple[Dict[str, Any], Dict[str, Any]]:
             try:
-                return self._tesla_fetcher(self._config)
+                if self._custom_tesla_fetcher:
+                    return self._tesla_fetcher(self._config, self._state_store)
+                return self._tesla_fetcher(self._config, self._state_store, self._cache)
             except Exception as err:
                 return {'status': 'error', 'error': str(err)}, {'status': 'error', 'error': str(err)}
 
@@ -336,7 +231,11 @@ class StatusCollector:
 
         def safe_job_health() -> Dict[str, Any]:
             try:
-                return self._job_health_fetcher(self._config)
+                health = self._job_health_fetcher(self._config, oidc_token)
+                last_run = self._cache.get(AUTOMATION_LAST_RUN_CACHE_KEY)
+                if isinstance(last_run, dict) and last_run.get('actions'):
+                    health = {**health, 'last_run_actions': list(last_run['actions'])}
+                return health
             except Exception as err:
                 return {'status': 'error', 'error': str(err)}
 
@@ -351,9 +250,10 @@ class StatusCollector:
         return {
             'fetched_at': datetime.datetime.now(datetime.timezone.utc).isoformat(),
             'cache_ttl_seconds': self._config.cache_ttl_seconds,
+            'cache_backend': self._cache.backend_name,
             'thresholds': {
-                'activation_excess_power': self._config.activation_excess_power,
-                'deactivation_excess_power': self._config.deactivation_excess_power,
+                'activation_excess_power': self._config.iaqualink.pool.activation_excess_power,
+                'deactivation_excess_power': self._config.iaqualink.pool.deactivation_excess_power,
             },
             'tesla': tesla_data,
             'iaqualink': iaq_data,
@@ -363,7 +263,6 @@ class StatusCollector:
 
 
 def _format_kw(watts: Optional[float]) -> str:
-    """Formats power in Tesla Energy style: '0 kW', '0.3 kW', '4.2 kW'."""
     if watts is None:
         return '—'
     kw = round(abs(float(watts)) / 1000.0, 1)
@@ -464,20 +363,20 @@ def render_dashboard_html(
     act_w = thresholds.get('activation_excess_power', 2000)
     deact_w = thresholds.get('deactivation_excess_power', 500)
 
-    # Header overall badge
     sched = job_health.get('scheduler') or {}
-    cr_job = job_health.get('cloud_run_job') or {}
+    job = job_health.get('job') or {}
     sched_state = sched.get('state')
-    if sched_state == 'ENABLED' and cr_job.get('completion_status') != 'EXECUTION_FAILED':
+    job_status = job.get('status')
+
+    if sched_state == 'ENABLED' and job_status != 'failed':
         overall_badge = '<span class="pill on-pill">Active</span>'
     elif sched_state == 'PAUSED':
         overall_badge = '<span class="pill warn-pill">Paused</span>'
-    elif tesla.get('status') == 'error' or cr_job.get('completion_status') == 'EXECUTION_FAILED':
+    elif tesla.get('status') == 'error' or job_status == 'failed':
         overall_badge = '<span class="pill err-pill">Attention</span>'
     else:
         overall_badge = '<span class="pill off-pill">Monitoring</span>'
 
-    # Tesla Energy hero diagram (Tesla app layout & labels)
     if tesla.get('status') == 'ok':
         solar_w = float(tesla.get('solar_power') or 0.0)
         load_w = float(tesla.get('load_power') or 0.0)
@@ -490,17 +389,13 @@ def render_dashboard_html(
 
         batt_pct = tesla.get('percentage_charged')
         batt_kw = _format_kw(tesla.get('battery_power'))
-        if batt_pct is not None:
-            powerwall_val = f'{batt_kw} · {batt_pct:.0f}%'
-        else:
-            powerwall_val = batt_kw
+        powerwall_val = f'{batt_kw} · {batt_pct:.0f}%' if batt_pct is not None else batt_kw
 
         batt_count = tesla.get('battery_count')
         powerwall_label = (
             f'POWERWALL · {int(batt_count)}x' if batt_count and int(batt_count) > 1 else 'POWERWALL'
         )
 
-        # Animated energy-flow overlay classes based on live power direction
         solar_flow_svg = (
             '<path class="flow-line flow-solar" d="M 272 222 L 280 232 L 280 264" />'
             if solar_w > 50
@@ -512,19 +407,15 @@ def render_dashboard_html(
             else ''
         )
         if batt_w < -50:
-            # Charging: Gateway -> Powerwall
             batt_flow_svg = '<path class="flow-line flow-batt" d="M 271 281 L 204 295" />'
         elif batt_w > 50:
-            # Discharging: Powerwall -> Gateway
             batt_flow_svg = '<path class="flow-line flow-batt" d="M 204 295 L 271 281" />'
         else:
             batt_flow_svg = ''
 
         if grid_w > 50:
-            # Importing: Grid -> Gateway
             grid_flow_svg = '<path class="flow-line flow-grid" d="M 432 356 L 348 332 L 284 314 L 280 302" />'
         elif grid_w < -50:
-            # Exporting: Gateway -> Grid
             grid_flow_svg = '<path class="flow-line flow-grid" d="M 280 302 L 284 314 L 348 332 L 432 356" />'
         else:
             grid_flow_svg = ''
@@ -599,11 +490,8 @@ def render_dashboard_html(
             </defs>
 
             <rect width="560" height="450" fill="url(#sceneBg)" />
-
-            <!-- Ground reflection shadow -->
             <ellipse cx="275" cy="348" rx="215" ry="34" fill="#050608" opacity="0.72" />
 
-            <!-- Back upper roof + solar array -->
             <polygon points="36,104 238,76 312,146 98,176" fill="url(#roofEdge)" stroke="#2e3139" stroke-width="1" />
             <polygon points="48,110 232,84 294,142 104,168" fill="url(#solarPanel)" stroke="#283144" stroke-width="1" />
             <g stroke="#283144" stroke-width="0.9" opacity="0.75">
@@ -614,9 +502,7 @@ def render_dashboard_html(
               <line x1="86" y1="149" x2="274" y2="122" />
             </g>
 
-            <!-- House left gable + garage wall -->
             <polygon points="36,192 98,154 176,236 176,342 36,288" fill="url(#wallSide)" stroke="#20232b" stroke-width="1" />
-            <!-- Garage door slats -->
             <polygon points="52,238 148,274 148,328 52,290" fill="#14161b" stroke="#252831" stroke-width="1" />
             <g stroke="#20232b" stroke-width="1">
               <line x1="52" y1="251" x2="148" y2="287" />
@@ -624,13 +510,10 @@ def render_dashboard_html(
               <line x1="52" y1="277" x2="148" y2="313" />
             </g>
 
-            <!-- House front right wall -->
             <polygon points="176,236 456,198 456,296 176,342" fill="url(#wallFront)" stroke="#22252d" stroke-width="1" />
 
-            <!-- Front main roof + solar array -->
             <polygon points="94,154 366,118 468,198 176,238" fill="url(#roofEdge)" stroke="#323640" stroke-width="1" />
             <polygon points="122,163 356,131 440,196 190,230" fill="url(#solarPanel)" stroke="#2a3447" stroke-width="1" />
-            <!-- Solar panel grid -->
             <g stroke="#2b364a" stroke-width="1" opacity="0.85">
               <line x1="168" y1="157" x2="238" y2="223" />
               <line x1="215" y1="150" x2="288" y2="216" />
@@ -640,14 +523,12 @@ def render_dashboard_html(
               <line x1="167" y1="208" x2="412" y2="174" />
             </g>
 
-            <!-- Lit 4-pane window on right -->
             <polygon points="370,242 436,233 436,286 370,296" fill="#0b0c0f" stroke="#2d313a" stroke-width="1.5" />
             <polygon points="374,246 401,242 401,266 374,270" fill="url(#winGlow)" />
             <polygon points="405,241 432,237 432,261 405,265" fill="url(#winGlow)" />
             <polygon points="374,274 401,270 401,291 374,295" fill="url(#winGlow)" opacity="0.92" />
             <polygon points="405,269 432,265 432,286 405,290" fill="url(#winGlow)" opacity="0.92" />
 
-            <!-- Static conduit lines -->
             <g fill="none" stroke="#2c303a" stroke-width="4" stroke-linecap="round" stroke-linejoin="round">
               <path d="M 272 222 L 280 232 L 280 264" />
               <path d="M 289 278 L 368 262" />
@@ -655,39 +536,32 @@ def render_dashboard_html(
               <path d="M 280 302 L 284 314 L 348 332 L 432 356" />
             </g>
 
-            <!-- Active directional energy flow lines -->
             {solar_flow_svg}
             {home_flow_svg}
             {batt_flow_svg}
             {grid_flow_svg}
 
-            <!-- Center Backup Gateway box -->
             <rect x="272" y="264" width="16" height="38" rx="2.5" fill="#4b505c" stroke="#646a78" stroke-width="1" />
             <circle cx="280" cy="292" r="2.6" fill="#cbd5e1" />
 
-            <!-- Powerwall unit on front-left wall -->
             <polygon points="175,286 181,284 181,341 175,342" fill="#22c55e" filter="url(#greenGlow)" />
             <polygon points="181,284 209,280 209,336 181,341" fill="url(#pwBody)" />
             <polygon points="175,286 203,282 209,280 181,284" fill="#ffffff" />
             <line x1="181" y1="297" x2="209" y2="293" stroke="#94a3b8" stroke-width="1" />
             <text x="195" y="309" text-anchor="middle" fill="#64748b" font-size="4.6" font-weight="700" letter-spacing="1.2">TESLA</text>
 
-            <!-- Leader line: SOLAR (top-left) -->
             <line x1="215" y1="68" x2="215" y2="184" stroke="#9ca3af" stroke-width="1" opacity="0.7" />
             <text x="215" y="35" text-anchor="middle" class="svg-label">SOLAR</text>
             <text x="215" y="61" text-anchor="middle" class="svg-value">{escape(solar_val)}</text>
 
-            <!-- Leader line: HOME (top-right) -->
             <line x1="406" y1="126" x2="406" y2="254" stroke="#9ca3af" stroke-width="1" opacity="0.7" />
             <text x="406" y="92" text-anchor="middle" class="svg-label">HOME</text>
             <text x="406" y="118" text-anchor="middle" class="svg-value">{escape(home_val)}</text>
 
-            <!-- Leader line: POWERWALL (bottom-left) -->
             <line x1="194" y1="344" x2="194" y2="375" stroke="#9ca3af" stroke-width="1" opacity="0.7" />
             <text x="194" y="395" text-anchor="middle" class="svg-label">{escape(powerwall_label)}</text>
             <text x="194" y="423" text-anchor="middle" class="svg-value">{escape(powerwall_val)}</text>
 
-            <!-- Leader line: GRID (bottom-right) -->
             <line x1="418" y1="358" x2="418" y2="375" stroke="#9ca3af" stroke-width="1" opacity="0.7" />
             <text x="418" y="395" text-anchor="middle" class="svg-label">GRID</text>
             <text x="418" y="423" text-anchor="middle" class="svg-value">{escape(grid_val)}</text>
@@ -702,7 +576,6 @@ def render_dashboard_html(
         err_msg = escape(str(tesla.get('error') or 'Unavailable'))
         tesla_html = f'<div class="card error-box">Tesla Energy unavailable: <code>{err_msg}</code></div>'
 
-    # iAquaLink section
     if iaq.get('status') == 'ok':
         temps = iaq.get('temperatures') or {}
         temp_chips = []
@@ -731,32 +604,31 @@ def render_dashboard_html(
         err_msg = escape(str(iaq.get('error') or 'Unavailable'))
         iaq_html = f'<div class="card error-box">iAquaLink unavailable: <code>{err_msg}</code></div>'
 
-    # Job & token health strip
-    exec_status = cr_job.get('completion_status')
-    if exec_status == 'EXECUTION_SUCCEEDED':
+    if job_status == 'succeeded':
         job_badge = '<span class="pill on-pill">Succeeded</span>'
-        job_time_prefix = 'Last run'
-    elif exec_status == 'EXECUTION_FAILED':
+        job_detail = f'Last run {_format_relative_iso(job.get("completed_at") or job.get("started_at"))}'
+    elif job_status == 'failed':
         job_badge = '<span class="pill err-pill">Failed</span>'
-        job_time_prefix = 'Last run'
-    elif exec_status == 'EXECUTION_RUNNING':
+        job_detail = f'Last run {_format_relative_iso(job.get("completed_at") or job.get("started_at"))}'
+    elif job_status == 'running':
         job_badge = '<span class="pill warn-pill">Running</span>'
-        job_time_prefix = 'Started'
-    elif exec_status == 'EXECUTION_PENDING':
+        job_detail = f'Started {_format_relative_iso(job.get("started_at"))}'
+    elif job_status == 'pending':
         job_badge = '<span class="pill warn-pill">Starting</span>'
-        job_time_prefix = 'Started'
-    elif exec_status == 'EXECUTION_CANCELLED':
-        job_badge = '<span class="pill off-pill">Cancelled</span>'
-        job_time_prefix = 'Last run'
-    elif exec_status:
-        pretty_status = str(exec_status).removeprefix('EXECUTION_').replace('_', ' ').title()
-        job_badge = f'<span class="pill warn-pill">{escape(pretty_status)}</span>'
-        job_time_prefix = 'Last run'
+        job_detail = f'Started {_format_relative_iso(job.get("started_at"))}'
+    elif job_health.get('status') == 'error':
+        job_badge = '<span class="pill err-pill">Error</span>'
+        job_detail = str(job_health.get('error') or 'Unavailable')
     else:
-        job_badge = f'<span class="pill off-pill">{escape(str(cr_job.get("error") or "Unknown"))}</span>'
-        job_time_prefix = 'Last run'
+        job_badge = '<span class="pill off-pill">Waiting</span>'
+        job_detail = 'No scheduled runs recorded yet'
 
-    last_run_rel = _format_relative_iso(cr_job.get('completion_time') or cr_job.get('create_time'))
+    last_actions = job_health.get('last_run_actions') or []
+    job_actions_html = (
+        f'<div class="health-detail" style="margin-top:0.35rem">{escape(" · ".join(str(a) for a in last_actions))}</div>'
+        if last_actions
+        else ''
+    )
 
     if sched_state == 'ENABLED':
         sched_badge = '<span class="pill on-pill">Enabled</span>'
@@ -773,7 +645,7 @@ def render_dashboard_html(
             '</form>'
         )
     else:
-        sched_badge = f'<span class="pill off-pill">{escape(str(sched_state or sched.get("error") or "Unknown"))}</span>'
+        sched_badge = '<span class="pill off-pill">Unknown</span>'
         sched_action_html = ''
     sched_desc = _format_cron_schedule(sched.get('schedule'))
 
@@ -782,7 +654,7 @@ def render_dashboard_html(
         tok_detail = f'Access token refreshes in {_format_duration_seconds(token_health.get("expires_in_seconds"))}'
     else:
         tok_badge = '<span class="pill err-pill">Error</span>'
-        tok_detail = str(token_health.get('error') or 'Check token secret')
+        tok_detail = str(token_health.get('error') or 'Authorize Tesla account')
 
     age_s = snapshot.get('age_seconds', 0)
     ttl_s = snapshot.get('cache_ttl_seconds', 60)
@@ -856,23 +728,9 @@ def render_dashboard_html(
       border-radius: 18px;
       overflow: hidden;
     }}
-    .energy-svg {{
-      display: block;
-      width: 100%;
-      height: auto;
-    }}
-    .svg-label {{
-      fill: #9ca3af;
-      font-size: 13px;
-      font-weight: 500;
-      letter-spacing: 0.09em;
-    }}
-    .svg-value {{
-      fill: #f8fafc;
-      font-size: 23px;
-      font-weight: 600;
-      letter-spacing: -0.01em;
-    }}
+    .energy-svg {{ display: block; width: 100%; height: auto; }}
+    .svg-label {{ fill: #9ca3af; font-size: 13px; font-weight: 500; letter-spacing: 0.09em; }}
+    .svg-value {{ fill: #f8fafc; font-size: 23px; font-weight: 600; letter-spacing: -0.01em; }}
     .flow-line {{
       fill: none;
       stroke-width: 3.5;
@@ -991,10 +849,11 @@ def render_dashboard_html(
     <div class="grid-3">
       <div class="card">
         <div class="health-top">
-          <span class="health-title">Cloud Run Job</span>
+          <span class="health-title">Automation Job</span>
           {job_badge}
         </div>
-        <div class="health-detail">{escape(job_time_prefix)} {escape(last_run_rel)}</div>
+        <div class="health-detail">{escape(job_detail)}</div>
+        {job_actions_html}
       </div>
       <div class="card">
         <div class="health-top">

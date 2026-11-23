@@ -1,22 +1,23 @@
-"""Minimal Tesla Fleet API client with OAuth2 refresh token rotation and persistence."""
+"""Tesla Fleet API client with OAuth2 refresh token rotation backed by StateStore."""
 
 from __future__ import annotations
 
 from dataclasses import dataclass
-import json
-import os
-from pathlib import Path
-import tempfile
 import time
-from typing import Any, Dict, List, Optional, Protocol
+from typing import Any, Dict, List, Optional
 
 import httpx
 
+from pool_on_solar.cache import AppCache
+from pool_on_solar.config import DEFAULT_API_BASE_URL
+from pool_on_solar.storage import StateStore
+
 DEFAULT_AUTH_BASE_URL = 'https://auth.tesla.com'
 DEFAULT_TOKEN_URL = 'https://fleet-auth.prd.vn.cloud.tesla.com/oauth2/v3/token'
-DEFAULT_API_BASE_URL = 'https://fleet-api.prd.na.vn.cloud.tesla.com'
 DEFAULT_SCOPES = 'openid offline_access energy_device_data'
 DEFAULT_REFRESH_BUFFER_SECONDS = 300
+TOKEN_STATE_KEY = 'tesla/token.json'
+ENERGY_SITE_ID_CACHE_TTL_SECONDS = 24 * 60 * 60
 
 
 class TeslaFleetError(RuntimeError):
@@ -25,7 +26,7 @@ class TeslaFleetError(RuntimeError):
 
 @dataclass
 class TokenData:
-    """OAuth2 token payload persisted across stateless job runs."""
+    """OAuth2 token payload persisted across stateless Vercel Function invocations."""
 
     access_token: str
     refresh_token: str
@@ -80,155 +81,7 @@ class TokenData:
         )
 
 
-class TokenStore(Protocol):
-    """Persistence backend for rotating Tesla OAuth2 tokens."""
-
-    def load(self) -> TokenData: ...
-
-    def save(self, token: TokenData) -> None: ...
-
-
-class LocalFileTokenStore:
-    """Persists OAuth2 tokens as JSON on the local filesystem."""
-
-    def __init__(self, path: str) -> None:
-        self._path = Path(path)
-
-    def load(self) -> TokenData:
-        if not self._path.exists():
-            raise FileNotFoundError(
-                f'Tesla token file not found at {self._path}. '
-                'Run tesla/authentication/main.py to generate initial tokens.'
-            )
-        with self._path.open('r', encoding='utf-8') as f:
-            return TokenData.from_dict(json.load(f))
-
-    def save(self, token: TokenData) -> None:
-        self._path.parent.mkdir(parents=True, exist_ok=True)
-        fd, tmp_path = tempfile.mkstemp(dir=str(self._path.parent), prefix='.tesla_token_')
-        try:
-            with os.fdopen(fd, 'w', encoding='utf-8') as f:
-                json.dump(token.to_dict(), f, indent=2)
-            os.chmod(tmp_path, 0o600)
-            os.replace(tmp_path, self._path)
-        except Exception:
-            if os.path.exists(tmp_path):
-                os.unlink(tmp_path)
-            raise
-
-
-class SecretManagerTokenStore:
-    """Persists OAuth2 tokens in Google Cloud Secret Manager.
-
-    Secret Manager versions are immutable, so each token refresh writes a new
-    version and immediately destroys all older non-destroyed versions so only
-    the latest version is kept.
-    """
-
-    def __init__(
-        self,
-        secret_name: str,
-        destroy_old_versions: bool = True,
-        client: Optional[Any] = None,
-    ) -> None:
-        self._secret_name = normalize_secret_name(secret_name)
-        self._destroy_old_versions = destroy_old_versions
-        self._client = client
-        self._last_loaded_version_name: Optional[str] = None
-
-    def _get_client(self) -> Any:
-        if self._client is None:
-            from google.cloud import secretmanager
-
-            self._client = secretmanager.SecretManagerServiceClient()
-        return self._client
-
-    def load(self) -> TokenData:
-        client = self._get_client()
-        version_path = f'{self._secret_name}/versions/latest'
-        response = client.access_secret_version(request={'name': version_path})
-        self._last_loaded_version_name = response.name
-        payload = json.loads(response.payload.data.decode('utf-8'))
-        return TokenData.from_dict(payload)
-
-    def _destroy_prior_versions(self, client: Any, keep_version_name: str) -> None:
-        try:
-            versions = client.list_secret_versions(
-                request={
-                    'parent': self._secret_name,
-                    'filter': 'state:ENABLED OR state:DISABLED',
-                }
-            )
-            names_to_destroy = [
-                v.name for v in versions if v.name != keep_version_name
-            ]
-        except Exception as err:
-            print(
-                f'Warning: could not list older versions of {self._secret_name}: {err}'
-            )
-            names_to_destroy = (
-                [self._last_loaded_version_name]
-                if self._last_loaded_version_name
-                and self._last_loaded_version_name != keep_version_name
-                else []
-            )
-
-        for version_name in names_to_destroy:
-            try:
-                client.destroy_secret_version(request={'name': version_name})
-            except Exception as err:
-                print(
-                    f'Warning: saved new Tesla token version {keep_version_name}, '
-                    f'but could not destroy older version {version_name}: {err}'
-                )
-
-    def save(self, token: TokenData) -> None:
-        client = self._get_client()
-        data = json.dumps(token.to_dict()).encode('utf-8')
-        new_version = client.add_secret_version(
-            request={
-                'parent': self._secret_name,
-                'payload': {'data': data},
-            }
-        )
-        if self._destroy_old_versions:
-            self._destroy_prior_versions(client, keep_version_name=new_version.name)
-        self._last_loaded_version_name = new_version.name
-
-
-def normalize_secret_name(secret_name: str, project_id: Optional[str] = None) -> str:
-    """Normalizes a Secret Manager secret name to projects/<project>/secrets/<id>."""
-    cleaned = secret_name.strip().rstrip('/')
-    if '/versions/' in cleaned:
-        cleaned = cleaned.split('/versions/', 1)[0]
-    if cleaned.startswith('projects/') and '/secrets/' in cleaned:
-        return cleaned
-    project = (
-        project_id
-        or os.getenv('GOOGLE_CLOUD_PROJECT')
-        or os.getenv('GCP_PROJECT')
-    )
-    if not project:
-        raise ValueError(
-            'TESLA_TOKEN_SECRET_NAME must be a full resource name '
-            '(projects/<project-id>/secrets/<secret-id>) or GOOGLE_CLOUD_PROJECT must be set.'
-        )
-    return f'projects/{project}/secrets/{cleaned}'
-
-
-def create_token_store(
-    secret_name: Optional[str] = None,
-    cache_file: Optional[str] = None,
-) -> TokenStore:
-    """Selects SecretManagerTokenStore when secret_name is configured, else LocalFileTokenStore."""
-    if secret_name:
-        return SecretManagerTokenStore(secret_name)
-    if cache_file:
-        return LocalFileTokenStore(cache_file)
-    raise ValueError('Either a Secret Manager secret name or a local token cache file must be configured.')
-
-
-def _build_httpx_client(timeout: float = 30.0) -> httpx.Client:
+def build_httpx_client(timeout: float = 30.0) -> httpx.Client:
     try:
         return httpx.Client(http2=True, timeout=timeout)
     except ImportError:
@@ -241,19 +94,23 @@ class TeslaFleetClient:
     def __init__(
         self,
         client_id: str,
-        token_store: TokenStore,
+        state_store: StateStore,
         api_base_url: str = DEFAULT_API_BASE_URL,
         token_url: str = DEFAULT_TOKEN_URL,
+        token_key: str = TOKEN_STATE_KEY,
         http_client: Optional[httpx.Client] = None,
+        cache: Optional[AppCache] = None,
     ) -> None:
         if not client_id:
             raise ValueError('TESLA_CLIENT_ID is required for Tesla Fleet API authentication.')
         self._client_id = client_id
-        self._token_store = token_store
+        self._state_store = state_store
         self._api_base_url = api_base_url.rstrip('/')
         self._token_url = token_url
+        self._token_key = token_key
         self._owns_http_client = http_client is None
-        self._http = http_client or _build_httpx_client()
+        self._http = http_client or build_httpx_client()
+        self._cache = cache
         self._token: Optional[TokenData] = None
 
     def __enter__(self) -> 'TeslaFleetClient':
@@ -266,9 +123,22 @@ class TeslaFleetClient:
         if self._owns_http_client:
             self._http.close()
 
+    @property
+    def current_token(self) -> Optional[TokenData]:
+        return self._token
+
+    def _load_token(self) -> TokenData:
+        raw = self._state_store.get_json(self._token_key)
+        if not raw:
+            raise TeslaFleetError(
+                'Tesla OAuth tokens not found in storage. Visit /oauth/login or run '
+                'scripts/tesla_auth.py to complete initial authorization.'
+            )
+        return TokenData.from_dict(raw)
+
     def _get_token(self, force_refresh: bool = False) -> TokenData:
         if self._token is None:
-            self._token = self._token_store.load()
+            self._token = self._load_token()
         if force_refresh or self._token.is_expired():
             self._token = self._refresh_token(self._token)
         return self._token
@@ -276,7 +146,7 @@ class TeslaFleetClient:
     def _refresh_token(self, current: TokenData) -> TokenData:
         if not current.refresh_token:
             raise TeslaFleetError(
-                'No Tesla refresh_token available. Re-run tesla/authentication/main.py.'
+                'No Tesla refresh_token available. Re-authorize via /oauth/login.'
             )
         response = self._http.post(
             self._token_url,
@@ -295,8 +165,8 @@ class TeslaFleetClient:
             response.json(),
             fallback_refresh_token=current.refresh_token,
         )
-        self._token_store.save(new_token)
-        print('Refreshed and persisted Tesla Fleet API OAuth tokens.')
+        self._state_store.set_json(self._token_key, new_token.to_dict())
+        print(f'Refreshed and persisted Tesla Fleet API OAuth tokens ({self._state_store.backend_name}).')
         return new_token
 
     def _request(
@@ -338,6 +208,12 @@ class TeslaFleetClient:
         return products
 
     def get_energy_site_id(self) -> str:
+        cache_key = f'tesla:energy-site-id:{self._client_id}'
+        if self._cache is not None:
+            cached = self._cache.get(cache_key)
+            if cached:
+                return str(cached)
+
         products = self.get_products()
         battery_sites = [
             p.get('energy_site_id')
@@ -346,18 +222,30 @@ class TeslaFleetClient:
             and p.get('resource_type') == 'battery'
             and p.get('energy_site_id') is not None
         ]
+        site_id: Optional[str] = None
         if battery_sites:
-            return str(battery_sites[0])
+            site_id = str(battery_sites[0])
+        else:
+            any_energy_sites = [
+                p.get('energy_site_id')
+                for p in products
+                if isinstance(p, dict) and p.get('energy_site_id') is not None
+            ]
+            if any_energy_sites:
+                site_id = str(any_energy_sites[0])
 
-        any_energy_sites = [
-            p.get('energy_site_id')
-            for p in products
-            if isinstance(p, dict) and p.get('energy_site_id') is not None
-        ]
-        if any_energy_sites:
-            return str(any_energy_sites[0])
+        if not site_id:
+            raise TeslaFleetError('Could not find an energy_site_id in Tesla products list.')
 
-        raise TeslaFleetError('Could not find an energy_site_id in Tesla products list.')
+        if self._cache is not None:
+            self._cache.set(
+                cache_key,
+                site_id,
+                ttl=ENERGY_SITE_ID_CACHE_TTL_SECONDS,
+                tags=['tesla-site'],
+                name='tesla-energy-site-id',
+            )
+        return site_id
 
     def get_live_status(self, energy_site_id: str) -> Dict[str, Any]:
         payload = self._request('GET', f'/api/1/energy_sites/{energy_site_id}/live_status')
