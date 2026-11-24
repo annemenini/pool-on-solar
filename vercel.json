@@ -1,0 +1,21 @@
+{
+  "$schema": "https://openapi.vercel.sh/vercel.json",
+  "fluid": true,
+  "functions": {
+    "api/web.py": {
+      "maxDuration": 30
+    }
+  },
+  "schedules": {
+    "pool-on-solar": {
+      "root": ".",
+      "entrypoint": "jobs"
+    }
+  },
+  "rewrites": [
+    {
+      "source": "/(.*)",
+      "destination": "/api/web"
+    }
+  ]
+}

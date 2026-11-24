@@ -146,6 +146,13 @@ dmypy.json
 # Pyre type checker
 .pyre/
 
+# Vercel & local state
+.vercel
+.local_state/
+.env
+.env.local
+
+
 # pytype static type analyzer
 .pytype/
 
