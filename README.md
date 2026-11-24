@@ -7,9 +7,8 @@ Automate the activation / deactivation of a Jandy iAquaLink pool cleaning system
 | Path | Vercel Primitive | Purpose |
 | :--- | :--- | :--- |
 | [api/web.py](api/web.py) | Function (Fluid Compute) | Serves the live Tesla Energy & iAquaLink dashboard (`/`), `/api/status`, Pause/Start Schedule controls (`/scheduler/pause`, `/scheduler/resume`), `/.well-known/appspecific/com.tesla.3p.public-key.pem`, and optional `/oauth/*` setup routes. |
-| [api/jobs/automation.py](api/jobs/automation.py) | Private Schedule (`schedule/v1beta`) | Runs every 15 minutes (`*/15 * * * *`, `America/Los_Angeles`): reads Tesla live status and controls iAquaLink pool pumps and lights. |
-| [api/jobs/analysis.py](api/jobs/analysis.py) | Private Schedule (`schedule/v1beta`) | Runs daily at `04:00` (`America/Los_Angeles`): fetches yesterday's 5-minute power and daily energy history and inserts rows into Google BigQuery. |
-| [pool_on_solar/](pool_on_solar/) | Shared Python package | Config ([config.json](config.json)), Private Vercel Blob token store (for rotating Tesla OAuth tokens), Vercel Runtime Cache wrapper (`vercel.cache.RuntimeCache` for dashboard snapshots, Tesla site ID, schedule idempotency, and last-run actions), Vercel Schedules API client (for native pause/resume & execution status), Tesla Fleet API client, automation, BigQuery analysis, and dashboard renderer. |
+| [jobs.py](jobs.py) | Vercel Schedules (`@schedule`) | Code-declared Python schedules registered via `vercel-schedules`: `pool-on-solar.automation` (every 15 min, `America/Los_Angeles`) controls iAquaLink pool pumps & lights, and `pool-on-solar.analysis` (daily at `04:00`, `America/Los_Angeles`) pushes yesterday's power & energy history to BigQuery. |
+| [pool_on_solar/](pool_on_solar/) | Shared Python package | Config ([config.json](config.json)), Private Vercel Blob token store (`vercel.blob` for rotating Tesla OAuth tokens), Vercel Runtime Cache wrapper (`vercel.cache.RuntimeCache` for dashboard snapshots, Tesla site ID, schedule idempotency, and last-run status), official `vercel.schedules.sync` adapter (for pause/resume & schedule status), Tesla Fleet API client, automation, BigQuery analysis, and dashboard renderer. |
 
 ## Requirements
 
@@ -90,16 +89,16 @@ Set `POWER_TABLE_ID` (e.g. `pool-on-solar.hilo_tesla.power`) and `ENERGY_TABLE_I
 
 ### 6. Managing Vercel Schedules
 
-Static schedules declared in [vercel.json](vercel.json) start active in Production (`pool-on-solar` every 15 min, `pool-on-solar-analysis` daily at 04:00 `America/Los_Angeles`). Inspect or trigger them with the CLI:
+Schedules declared with `@schedule` in [jobs.py](jobs.py) (registered via `"schedules": { "pool-on-solar": { "root": ".", "entrypoint": "jobs" } }` in [vercel.json](vercel.json)) start active in Production as `pool-on-solar.automation` (every 15 min) and `pool-on-solar.analysis` (daily at `04:00` `America/Los_Angeles`). Inspect or trigger them with the CLI:
 
 ```bash
 vercel schedules list
-vercel schedules invoke pool-on-solar
-vercel schedules invoke pool-on-solar-analysis
-vercel schedules executions list pool-on-solar --since 7d
+vercel schedules invoke pool-on-solar.automation
+vercel schedules invoke pool-on-solar.analysis
+vercel schedules executions list pool-on-solar.automation --since 7d
 ```
 
-The **Pause Schedule / Start Schedule** button on the dashboard calls the native **Vercel Schedules HTTP API** (`https://vercel-schedules.com/v1/schedules/pool-on-solar/disable` and `/enable`, authenticated automatically via the deployment's `VERCEL_OIDC_TOKEN`), and reads live execution status directly from Vercel Schedules. Enabled/disabled state persists across deployments.
+The **Pause Schedule / Start Schedule** button on the dashboard uses the official `vercel-schedules` Python SDK (`vercel.schedules.sync.disable_schedule` / `enable_schedule` / `get_schedule`, authenticated via the deployment's Vercel OIDC token). Enabled/disabled state persists across deployments, and recent run status & actions are surfaced via Vercel Runtime Cache.
 
 ## Configuration Reference
 

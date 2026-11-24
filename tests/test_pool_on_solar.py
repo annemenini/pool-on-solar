@@ -92,6 +92,47 @@ def _install_optional_stubs() -> None:
             suntime_mod.Sun = MagicMock()
             sys.modules['suntime'] = suntime_mod
 
+    if 'vercel.schedules' not in sys.modules:
+        try:
+            import vercel.schedules  # noqa: F401
+        except ImportError:
+            vercel_pkg = sys.modules.get('vercel') or types.ModuleType('vercel')
+            vercel_pkg.__path__ = getattr(vercel_pkg, '__path__', [])
+            sys.modules['vercel'] = vercel_pkg
+
+            sched_mod = types.ModuleType('vercel.schedules')
+            registered: list = []
+
+            class _ScheduleMetadata:
+                def __init__(
+                    self,
+                    schedule_id: str,
+                    execution_id: str,
+                    name: str,
+                    namespace: str,
+                    scheduled_at: datetime.datetime,
+                    source: str = 'static',
+                    expression: str = '*/15 * * * *',
+                ) -> None:
+                    self.schedule_id = schedule_id
+                    self.execution_id = execution_id
+                    self.name = name
+                    self.namespace = namespace
+                    self.scheduled_at = scheduled_at
+                    self.source = source
+                    self.expression = expression
+
+            def _schedule_decorator(**kwargs):
+                def _wrap(fn):
+                    registered.append((kwargs, fn))
+                    return fn
+                return _wrap
+
+            sched_mod.ScheduleMetadata = _ScheduleMetadata
+            sched_mod.schedule = _schedule_decorator
+            sched_mod._registered = registered
+            sys.modules['vercel.schedules'] = sched_mod
+
 
 _install_optional_stubs()
 
@@ -186,25 +227,19 @@ class VercelConfigAndStorageTests(unittest.TestCase):
         self.assertEqual((REPO_ROOT / '.python-version').read_text(encoding='utf-8').strip(), '3.14')
         pyproject = (REPO_ROOT / 'pyproject.toml').read_text(encoding='utf-8')
         self.assertIn('>=3.14', pyproject)
+        self.assertIn('vercel-schedules', pyproject)
 
         vcfg = json.loads((REPO_ROOT / 'vercel.json').read_text(encoding='utf-8'))
         self.assertTrue(vcfg['fluid'])
         self.assertIn('schedules', vcfg)
         self.assertNotIn('crons', vcfg)
-
-        # Scheduled functions must declare schedule/v1beta and must NOT be targeted by public rewrites.
-        auto_fn = vcfg['functions']['api/jobs/automation.py']
-        analysis_fn = vcfg['functions']['api/jobs/analysis.py']
-        self.assertEqual(auto_fn['experimentalTriggers'], [{'type': 'schedule/v1beta'}])
-        self.assertEqual(analysis_fn['experimentalTriggers'], [{'type': 'schedule/v1beta'}])
-
-        self.assertEqual(vcfg['schedules']['pool-on-solar']['function'], 'api/jobs/automation')
-        self.assertEqual(vcfg['schedules']['pool-on-solar']['schedule'], '*/15 * * * *')
-        self.assertEqual(vcfg['schedules']['pool-on-solar-analysis']['function'], 'api/jobs/analysis')
-
+        self.assertEqual(
+            vcfg['schedules']['pool-on-solar'],
+            {'root': '.', 'entrypoint': 'jobs'},
+        )
         for rewrite in vcfg['rewrites']:
-            self.assertNotIn('jobs/', rewrite['source'])
-            self.assertNotIn('jobs/', str(rewrite['destination']))
+            self.assertNotIn('jobs', rewrite['source'])
+            self.assertNotIn('jobs', str(rewrite['destination']))
 
     def test_all_python_files_compile_without_syntax_errors(self):
         for path in sorted(REPO_ROOT.rglob('*.py')):
@@ -469,41 +504,79 @@ class TeslaFleetAndAutomationTests(unittest.TestCase):
             )
             self.assertEqual(stale['reason'], 'stale_occurrence')
 
-    def test_vercel_schedules_client_health_enable_and_disable(self):
-        fake_http = _FakeHttpClient([
-            _FakeResponse(200, {
-                'name': 'pool-on-solar',
-                'status': 'active',
-                'expression': {'type': 'cron', 'cron': '*/15 * * * *'},
-            }),
-            _FakeResponse(200, {
-                'executions': [{
-                    'executionId': 'ex-1',
-                    'status': 'succeeded',
-                    'startedAt': '2026-11-23T05:00:00Z',
-                    'completedAt': '2026-11-23T05:00:05Z',
-                }]
-            }),
-            _FakeResponse(200, {'status': 'disabled'}),
-            _FakeResponse(200, {'status': 'active'}),
-        ])
+    def test_vercel_schedules_client_uses_official_sdk(self):
+        calls = []
+        session_options_seen = []
+
+        class _FakeSession:
+            def __init__(self, *, service_options):
+                session_options_seen.append(service_options)
+
+            def __enter__(self):
+                return self
+
+            def __exit__(self, *args):
+                return None
+
+        class _FakeOptions:
+            def __init__(self, *, credentials_factory):
+                self.credentials_factory = credentials_factory
+
+        class _FakeSchedulesSdk:
+            SchedulesServiceOptions = _FakeOptions
+
+            @staticmethod
+            def static_credentials_factory(token):
+                return lambda: token
+
+            @staticmethod
+            def get_schedule(name, **kwargs):
+                calls.append(('get', name, kwargs))
+                return types.SimpleNamespace(
+                    name=name,
+                    is_active=True,
+                    expression='*/15 * * * *',
+                    timezone='America/Los_Angeles',
+                )
+
+            @staticmethod
+            def disable_schedule(name, **kwargs):
+                calls.append(('disable', name, kwargs))
+                return types.SimpleNamespace(
+                    name=name,
+                    is_active=False,
+                    expression='*/15 * * * *',
+                    timezone='America/Los_Angeles',
+                )
+
+            @staticmethod
+            def enable_schedule(name, **kwargs):
+                calls.append(('enable', name, kwargs))
+                return types.SimpleNamespace(
+                    name=name,
+                    is_active=True,
+                    expression='*/15 * * * *',
+                    timezone='America/Los_Angeles',
+                )
+
         client = VercelSchedulesClient(
-            schedule_name='pool-on-solar',
+            schedule_name='pool-on-solar.automation',
             oidc_token='oidc-jwt-123',
-            http_client=fake_http,
+            schedules_sdk=_FakeSchedulesSdk,
+            session_factory=_FakeSession,
         )
         health = client.get_health()
         self.assertEqual(health['scheduler']['state'], 'ENABLED')
         self.assertEqual(health['scheduler']['schedule'], '*/15 * * * *')
-        self.assertEqual(health['job']['status'], 'succeeded')
 
-        client.disable()
-        client.enable()
-        self.assertEqual(fake_http.calls[2][0], 'POST')
-        self.assertTrue(fake_http.calls[2][1].endswith('/v1/schedules/pool-on-solar/disable'))
-        self.assertEqual(fake_http.calls[3][0], 'POST')
-        self.assertTrue(fake_http.calls[3][1].endswith('/v1/schedules/pool-on-solar/enable'))
-        self.assertEqual(fake_http.calls[0][2]['headers']['Authorization'], 'Bearer oidc-jwt-123')
+        disabled = client.disable()
+        self.assertEqual(disabled['state'], 'PAUSED')
+        enabled = client.enable()
+        self.assertEqual(enabled['state'], 'ENABLED')
+
+        self.assertEqual([c[0] for c in calls], ['get', 'disable', 'enable'])
+        self.assertEqual(len(session_options_seen), 3)
+        self.assertEqual(session_options_seen[0][0].credentials_factory(), 'oidc-jwt-123')
 
     def test_daily_analysis_inserts_into_bigquery_and_wif_exchange(self):
         fake_sts_http = _FakeHttpClient([
@@ -573,8 +646,7 @@ class VercelWebAndJobFunctionsTests(unittest.TestCase):
     @classmethod
     def setUpClass(cls):
         cls.web_mod = _load_module('vercel_api_web', REPO_ROOT / 'api' / 'web.py')
-        cls.auto_job_mod = _load_module('vercel_api_job_auto', REPO_ROOT / 'api' / 'jobs' / 'automation.py')
-        cls.analysis_job_mod = _load_module('vercel_api_job_analysis', REPO_ROOT / 'api' / 'jobs' / 'analysis.py')
+        cls.jobs_mod = _load_module('vercel_jobs', REPO_ROOT / 'jobs.py')
 
     def test_web_function_dashboard_schedule_toggle_public_key_and_oauth(self):
         with tempfile.TemporaryDirectory() as tmpdir:
@@ -764,43 +836,40 @@ class VercelWebAndJobFunctionsTests(unittest.TestCase):
                 server.shutdown()
                 server.server_close()
 
-    def test_private_schedule_job_handlers(self):
+    def test_code_declared_schedule_jobs(self):
+        import vercel.schedules as vs
+
+        registered = getattr(vs, '_registered', None)
+        if registered is not None:
+            names = [meta['name'] for meta, _ in registered]
+            self.assertIn('automation', names)
+            self.assertIn('analysis', names)
+
+        meta = vs.ScheduleMetadata(
+            schedule_id='sched-1',
+            execution_id='exec-1',
+            name='pool-on-solar.automation',
+            namespace='default',
+            scheduled_at=datetime.datetime.now(datetime.timezone.utc) - datetime.timedelta(minutes=30),
+            source='static',
+            expression='*/15 * * * *',
+        )
         with tempfile.TemporaryDirectory() as tmpdir:
             store = LocalFileStateStore(tmpdir)
-
+            cache = MemoryCache()
             with (
-                patch.object(self.auto_job_mod, 'create_state_store', return_value=store),
-                patch.object(self.auto_job_mod, 'load_config', return_value=AppConfig()),
+                patch.object(self.jobs_mod, 'create_state_store', return_value=store),
+                patch.object(self.jobs_mod, 'create_app_cache', return_value=cache),
+                patch.object(self.jobs_mod, 'load_config', return_value=AppConfig()),
+                patch.object(
+                    self.jobs_mod,
+                    'run_scheduled_automation',
+                    new=AsyncMock(return_value={'status': 'skipped', 'reason': 'stale_occurrence'}),
+                ) as mock_run,
             ):
-                server = ThreadingHTTPServer(('127.0.0.1', 0), self.auto_job_mod.handler)
-                thread = threading.Thread(target=server.serve_forever, daemon=True)
-                thread.start()
-                port = server.server_address[1]
-                try:
-                    conn = HTTPConnection('127.0.0.1', port)
-                    stale_ts = (
-                        datetime.datetime.now(datetime.timezone.utc) - datetime.timedelta(minutes=30)
-                    ).isoformat()
-                    payload = json.dumps({
-                        'name': 'pool-on-solar',
-                        'executionId': 'sched-exec-1',
-                        'scheduledAt': stale_ts,
-                    }).encode('utf-8')
-                    conn.request(
-                        'POST',
-                        '/api/jobs/automation',
-                        body=payload,
-                        headers={'Content-Type': 'application/json', 'Content-Length': str(len(payload))},
-                    )
-                    resp = conn.getresponse()
-                    body = json.loads(resp.read().decode('utf-8'))
-                    self.assertEqual(resp.status, 200)
-                    self.assertEqual(body['status'], 'skipped')
-                    self.assertEqual(body['reason'], 'stale_occurrence')
-                    conn.close()
-                finally:
-                    server.shutdown()
-                    server.server_close()
+                asyncio.run(self.jobs_mod.automation_job(meta))
+                mock_run.assert_awaited_once()
+                self.assertEqual(mock_run.call_args.kwargs['execution_id'], 'exec-1')
 
 
 if __name__ == '__main__':

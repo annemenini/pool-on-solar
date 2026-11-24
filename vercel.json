@@ -3,59 +3,18 @@
   "fluid": true,
   "functions": {
     "api/web.py": {
-      "maxDuration": 60,
-      "excludeFiles": "{tests/**,scripts/**}"
-    },
-    "api/jobs/automation.py": {
-      "maxDuration": 120,
-      "experimentalTriggers": [
-        {
-          "type": "schedule/v1beta"
-        }
-      ],
-      "excludeFiles": "{tests/**,scripts/**}"
-    },
-    "api/jobs/analysis.py": {
-      "maxDuration": 180,
-      "experimentalTriggers": [
-        {
-          "type": "schedule/v1beta"
-        }
-      ],
-      "excludeFiles": "{tests/**,scripts/**}"
+      "maxDuration": 30
     }
   },
   "schedules": {
     "pool-on-solar": {
-      "schedule": "*/15 * * * *",
-      "timezone": "America/Los_Angeles",
-      "function": "api/jobs/automation"
-    },
-    "pool-on-solar-analysis": {
-      "schedule": "0 4 * * *",
-      "timezone": "America/Los_Angeles",
-      "function": "api/jobs/analysis"
+      "root": ".",
+      "entrypoint": "jobs"
     }
   },
   "rewrites": [
     {
-      "source": "/.well-known/appspecific/com.tesla.3p.public-key.pem",
-      "destination": "/api/web"
-    },
-    {
-      "source": "/api/status",
-      "destination": "/api/web"
-    },
-    {
-      "source": "/scheduler/:action",
-      "destination": "/api/web"
-    },
-    {
-      "source": "/oauth",
-      "destination": "/api/web"
-    },
-    {
-      "source": "/oauth/:action*",
+      "source": "/",
       "destination": "/api/web"
     },
     {
@@ -63,7 +22,23 @@
       "destination": "/api/web"
     },
     {
-      "source": "/",
+      "source": "/api/status",
+      "destination": "/api/web"
+    },
+    {
+      "source": "/scheduler/(.*)",
+      "destination": "/api/web"
+    },
+    {
+      "source": "/oauth",
+      "destination": "/api/web"
+    },
+    {
+      "source": "/oauth/(.*)",
+      "destination": "/api/web"
+    },
+    {
+      "source": "/.well-known/appspecific/com.tesla.3p.public-key.pem",
       "destination": "/api/web"
     }
   ]

@@ -15,7 +15,10 @@ from pool_on_solar.cache import AppCache, MemoryCache
 from pool_on_solar.config import AppConfig
 from pool_on_solar.storage import StateStore
 from pool_on_solar.tesla_fleet import TeslaFleetClient
-from pool_on_solar.vercel_schedules import VercelSchedulesClient
+from pool_on_solar.vercel_schedules import (
+    DEFAULT_AUTOMATION_SCHEDULE_NAME,
+    VercelSchedulesClient,
+)
 
 DASHBOARD_SNAPSHOT_CACHE_KEY = 'dashboard:snapshot'
 DASHBOARD_STATUS_TAG = 'dashboard-status'
@@ -131,7 +134,7 @@ def _fetch_schedule_health(
     config: AppConfig,
     oidc_token: Optional[str] = None,
 ) -> Dict[str, Any]:
-    schedule_name = os.getenv('VERCEL_SCHEDULE_NAME', 'pool-on-solar')
+    schedule_name = os.getenv('VERCEL_SCHEDULE_NAME', DEFAULT_AUTOMATION_SCHEDULE_NAME)
     client = VercelSchedulesClient(schedule_name=schedule_name, oidc_token=oidc_token)
     return client.get_health(fallback_cron=config.schedule_cron)
 
@@ -143,7 +146,7 @@ def _toggle_vercel_schedule(
 ) -> Dict[str, Any]:
     if action not in {'pause', 'resume'}:
         raise ValueError(f'Invalid scheduler action: {action}')
-    schedule_name = os.getenv('VERCEL_SCHEDULE_NAME', 'pool-on-solar')
+    schedule_name = os.getenv('VERCEL_SCHEDULE_NAME', DEFAULT_AUTOMATION_SCHEDULE_NAME)
     client = VercelSchedulesClient(schedule_name=schedule_name, oidc_token=oidc_token)
     return client.disable() if action == 'pause' else client.enable()
 
@@ -233,8 +236,19 @@ class StatusCollector:
             try:
                 health = self._job_health_fetcher(self._config, oidc_token)
                 last_run = self._cache.get(AUTOMATION_LAST_RUN_CACHE_KEY)
-                if isinstance(last_run, dict) and last_run.get('actions'):
-                    health = {**health, 'last_run_actions': list(last_run['actions'])}
+                if isinstance(last_run, dict):
+                    job = dict(health.get('job') or {})
+                    if not job.get('status') and last_run.get('status'):
+                        job['status'] = last_run['status']
+                    if not job.get('started_at') and last_run.get('started_at'):
+                        job['started_at'] = last_run['started_at']
+                    if not job.get('completed_at') and last_run.get('completed_at'):
+                        job['completed_at'] = last_run['completed_at']
+                    if not job.get('error') and last_run.get('error'):
+                        job['error'] = last_run['error']
+                    health = {**health, 'job': job}
+                    if last_run.get('actions'):
+                        health['last_run_actions'] = list(last_run['actions'])
                 return health
             except Exception as err:
                 return {'status': 'error', 'error': str(err)}

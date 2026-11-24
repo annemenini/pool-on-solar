@@ -259,14 +259,48 @@ async def run_scheduled_automation(
         except ValueError:
             pass
 
+    started_at = datetime.datetime.now(datetime.timezone.utc).isoformat()
+    if cache is not None:
+        cache.set(
+            AUTOMATION_LAST_RUN_CACHE_KEY,
+            {
+                'status': 'running',
+                'started_at': started_at,
+                'execution_id': execution_id,
+            },
+            ttl=AUTOMATION_LAST_RUN_TTL_SECONDS,
+            tags=['automation-run'],
+            name='automation-last-run',
+        )
+
     active_controller = controller or Controller(config, state_store, cache=cache)
-    result = await active_controller.control_home()
+    try:
+        result = await active_controller.control_home()
+    except Exception as err:
+        if cache is not None:
+            cache.set(
+                AUTOMATION_LAST_RUN_CACHE_KEY,
+                {
+                    'status': 'failed',
+                    'started_at': started_at,
+                    'completed_at': datetime.datetime.now(datetime.timezone.utc).isoformat(),
+                    'execution_id': execution_id,
+                    'error': str(err),
+                },
+                ttl=AUTOMATION_LAST_RUN_TTL_SECONDS,
+                tags=['automation-run'],
+                name='automation-last-run',
+            )
+            cache.expire_tag(DASHBOARD_STATUS_TAG)
+        raise
+
     actions = result.get('actions', [])
+    completed_at = datetime.datetime.now(datetime.timezone.utc).isoformat()
     if cache is not None:
         if exec_cache_key:
             cache.set(
                 exec_cache_key,
-                {'completed_at': datetime.datetime.now(datetime.timezone.utc).isoformat()},
+                {'completed_at': completed_at},
                 ttl=AUTOMATION_EXEC_IDEMPOTENCY_TTL_SECONDS,
                 tags=['schedule-exec'],
                 name='automation-execution-idempotency',
@@ -274,7 +308,9 @@ async def run_scheduled_automation(
         cache.set(
             AUTOMATION_LAST_RUN_CACHE_KEY,
             {
-                'completed_at': datetime.datetime.now(datetime.timezone.utc).isoformat(),
+                'status': 'succeeded',
+                'started_at': started_at,
+                'completed_at': completed_at,
                 'execution_id': execution_id,
                 'excess_power': result.get('excess_power'),
                 'battery_percentage': result.get('battery_percentage'),

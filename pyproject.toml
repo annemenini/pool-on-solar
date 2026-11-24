@@ -9,5 +9,6 @@ dependencies = [
     "iaqualink>=0.7.0",
     "pytz",
     "suntime",
-    "vercel>=0.4.0",
+    "vercel>=0.13.3",
+    "vercel-schedules>=0.1.1",
 ]
