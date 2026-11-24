@@ -6,9 +6,9 @@ import datetime
 import json
 import os
 from typing import Any, Dict, List, Optional, Tuple
+from zoneinfo import ZoneInfo
 
 import httpx
-import pytz
 
 from pool_on_solar.cache import AppCache
 from pool_on_solar.config import AppConfig
@@ -21,17 +21,15 @@ ANALYSIS_EXEC_IDEMPOTENCY_TTL_SECONDS = 24 * 60 * 60
 
 def get_yesterday_window_utc(timezone_name: str) -> Tuple[str, str, str]:
     """Returns (yesterday_iso_date, start_utc_iso, end_utc_iso) for the given local timezone."""
-    local_tz = pytz.timezone(timezone_name)
+    local_tz = ZoneInfo(timezone_name)
     now_local = datetime.datetime.now(datetime.timezone.utc).astimezone(local_tz)
     yesterday = now_local.date() - datetime.timedelta(days=1)
-    start_local = local_tz.localize(
-        datetime.datetime.combine(yesterday, datetime.time(0, 0, 0))
-    )
-    end_local = local_tz.localize(
-        datetime.datetime.combine(yesterday, datetime.time(23, 59, 59))
-    )
-    start_utc = start_local.astimezone(pytz.UTC)
-    end_utc = end_local.astimezone(pytz.UTC)
+    start_utc = datetime.datetime.combine(
+        yesterday, datetime.time(0, 0, 0), tzinfo=local_tz
+    ).astimezone(datetime.timezone.utc)
+    end_utc = datetime.datetime.combine(
+        yesterday, datetime.time(23, 59, 59), tzinfo=local_tz
+    ).astimezone(datetime.timezone.utc)
     return (
         yesterday.isoformat(),
         start_utc.strftime('%Y-%m-%dT%H:%M:%S.000Z'),
@@ -90,6 +88,20 @@ def exchange_vercel_oidc_for_gcp_access_token(
         return _run(client)
 
 
+def _resolve_vercel_oidc_token(explicit_token: Optional[str]) -> Optional[str]:
+    if explicit_token:
+        return explicit_token
+    try:
+        from vercel.oidc import get_vercel_oidc_token
+
+        token = get_vercel_oidc_token()
+        if token:
+            return token
+    except Exception:
+        pass
+    return os.getenv('VERCEL_OIDC_TOKEN')
+
+
 def create_bigquery_client(oidc_token: Optional[str] = None) -> Any:
     """Creates a BigQuery client using Vercel OIDC WIF, service account JSON, or ADC."""
     from google.cloud import bigquery
@@ -103,7 +115,7 @@ def create_bigquery_client(oidc_token: Optional[str] = None) -> Any:
     pool_id = os.getenv('GCP_WORKLOAD_IDENTITY_POOL_ID')
     provider_id = os.getenv('GCP_WORKLOAD_IDENTITY_POOL_PROVIDER_ID')
     sa_email = os.getenv('GCP_SERVICE_ACCOUNT_EMAIL')
-    token = oidc_token or os.getenv('VERCEL_OIDC_TOKEN')
+    token = _resolve_vercel_oidc_token(oidc_token)
     if project_number and pool_id and provider_id and sa_email and token:
         access_token = exchange_vercel_oidc_for_gcp_access_token(
             oidc_token=token,

@@ -7,6 +7,11 @@ import threading
 import time
 from typing import Any, Dict, List, Optional, Protocol, Sequence, Tuple, Union
 
+DASHBOARD_SNAPSHOT_CACHE_KEY = 'dashboard:snapshot'
+DASHBOARD_STATUS_TAG = 'dashboard-status'
+AUTOMATION_LAST_RUN_CACHE_KEY = 'automation:last-run'
+TESLA_SITE_TAG = 'tesla-site'
+
 
 class AppCache(Protocol):
     """Key-value ephemeral cache with TTL and tag-based invalidation."""

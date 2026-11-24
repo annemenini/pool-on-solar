@@ -8,7 +8,7 @@ from typing import Any, Dict, List, Optional
 
 import httpx
 
-from pool_on_solar.cache import AppCache
+from pool_on_solar.cache import AppCache, TESLA_SITE_TAG
 from pool_on_solar.config import DEFAULT_API_BASE_URL
 from pool_on_solar.storage import StateStore
 
@@ -88,6 +88,17 @@ def build_httpx_client(timeout: float = 30.0) -> httpx.Client:
         return httpx.Client(timeout=timeout)
 
 
+def select_energy_site_id(products: List[Dict[str, Any]]) -> Optional[str]:
+    """Picks the primary battery energy site ID (or first energy site ID) from Tesla products."""
+    for prefer_battery in (True, False):
+        for item in products:
+            if not isinstance(item, dict) or item.get('energy_site_id') is None:
+                continue
+            if not prefer_battery or item.get('resource_type') == 'battery':
+                return str(item['energy_site_id'])
+    return None
+
+
 class TeslaFleetClient:
     """Client for Tesla Fleet API energy endpoints with automatic token refresh."""
 
@@ -131,8 +142,7 @@ class TeslaFleetClient:
         raw = self._state_store.get_json(self._token_key)
         if not raw:
             raise TeslaFleetError(
-                'Tesla OAuth tokens not found in storage. Visit /oauth/login or run '
-                'scripts/tesla_auth.py to complete initial authorization.'
+                'Tesla OAuth tokens not found in storage. Visit /oauth to authorize.'
             )
         return TokenData.from_dict(raw)
 
@@ -214,26 +224,7 @@ class TeslaFleetClient:
             if cached:
                 return str(cached)
 
-        products = self.get_products()
-        battery_sites = [
-            p.get('energy_site_id')
-            for p in products
-            if isinstance(p, dict)
-            and p.get('resource_type') == 'battery'
-            and p.get('energy_site_id') is not None
-        ]
-        site_id: Optional[str] = None
-        if battery_sites:
-            site_id = str(battery_sites[0])
-        else:
-            any_energy_sites = [
-                p.get('energy_site_id')
-                for p in products
-                if isinstance(p, dict) and p.get('energy_site_id') is not None
-            ]
-            if any_energy_sites:
-                site_id = str(any_energy_sites[0])
-
+        site_id = select_energy_site_id(self.get_products())
         if not site_id:
             raise TeslaFleetError('Could not find an energy_site_id in Tesla products list.')
 
@@ -242,7 +233,7 @@ class TeslaFleetClient:
                 cache_key,
                 site_id,
                 ttl=ENERGY_SITE_ID_CACHE_TTL_SECONDS,
-                tags=['tesla-site'],
+                tags=[TESLA_SITE_TAG],
                 name='tesla-energy-site-id',
             )
         return site_id

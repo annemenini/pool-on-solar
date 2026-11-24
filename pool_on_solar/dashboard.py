@@ -6,23 +6,21 @@ import asyncio
 from concurrent.futures import ThreadPoolExecutor
 import datetime
 from html import escape
-import os
 import threading
 import time
 from typing import Any, Callable, Dict, List, Optional, Tuple
 
-from pool_on_solar.cache import AppCache, MemoryCache
+from pool_on_solar.cache import (
+    AUTOMATION_LAST_RUN_CACHE_KEY,
+    DASHBOARD_SNAPSHOT_CACHE_KEY,
+    DASHBOARD_STATUS_TAG,
+    AppCache,
+    MemoryCache,
+)
 from pool_on_solar.config import AppConfig
 from pool_on_solar.storage import StateStore
 from pool_on_solar.tesla_fleet import TeslaFleetClient
-from pool_on_solar.vercel_schedules import (
-    DEFAULT_AUTOMATION_SCHEDULE_NAME,
-    VercelSchedulesClient,
-)
-
-DASHBOARD_SNAPSHOT_CACHE_KEY = 'dashboard:snapshot'
-DASHBOARD_STATUS_TAG = 'dashboard-status'
-AUTOMATION_LAST_RUN_CACHE_KEY = 'automation:last-run'
+from pool_on_solar.vercel_schedules import VercelSchedulesClient
 
 
 def _fetch_tesla_live(
@@ -134,9 +132,9 @@ def _fetch_schedule_health(
     config: AppConfig,
     oidc_token: Optional[str] = None,
 ) -> Dict[str, Any]:
-    schedule_name = os.getenv('VERCEL_SCHEDULE_NAME', DEFAULT_AUTOMATION_SCHEDULE_NAME)
-    client = VercelSchedulesClient(schedule_name=schedule_name, oidc_token=oidc_token)
-    return client.get_health(fallback_cron=config.schedule_cron)
+    return VercelSchedulesClient(oidc_token=oidc_token).get_health(
+        fallback_cron=config.schedule_cron
+    )
 
 
 def _toggle_vercel_schedule(
@@ -146,8 +144,7 @@ def _toggle_vercel_schedule(
 ) -> Dict[str, Any]:
     if action not in {'pause', 'resume'}:
         raise ValueError(f'Invalid scheduler action: {action}')
-    schedule_name = os.getenv('VERCEL_SCHEDULE_NAME', DEFAULT_AUTOMATION_SCHEDULE_NAME)
-    client = VercelSchedulesClient(schedule_name=schedule_name, oidc_token=oidc_token)
+    client = VercelSchedulesClient(oidc_token=oidc_token)
     return client.disable() if action == 'pause' else client.enable()
 
 

@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import asyncio
 import json
 import os
 from pathlib import Path
@@ -11,7 +10,7 @@ from typing import Any, Dict, Optional, Protocol
 
 
 class StateStore(Protocol):
-    """Key-value JSON store for rotating OAuth tokens and automation schedule state."""
+    """Durable key-value JSON store (used for rotating Tesla OAuth tokens)."""
 
     @property
     def backend_name(self) -> str: ...
@@ -22,7 +21,7 @@ class StateStore(Protocol):
 
 
 class VercelBlobStateStore:
-    """Stores JSON documents in a private Vercel Blob store via vercel-blob."""
+    """Stores JSON documents in a private Vercel Blob store via `vercel.blob.sync`."""
 
     def __init__(
         self,
@@ -39,27 +38,16 @@ class VercelBlobStateStore:
     def _pathname(self, key: str) -> str:
         return f'{self._prefix}{key.lstrip("/")}'
 
-    def _get_blob_module(self) -> Any:
+    def _blob(self) -> Any:
         if self._blob_module is None:
-            try:
-                from vercel.blob import sync as vercel_blob
-            except ImportError:
-                from vercel import blob as vercel_blob
+            from vercel.blob import sync as blob_sync
 
-            self._blob_module = vercel_blob
+            self._blob_module = blob_sync
         return self._blob_module
 
     def get_json(self, key: str) -> Optional[Dict[str, Any]]:
-        blob = self._get_blob_module()
-        pathname = self._pathname(key)
-        getter = getattr(blob, 'get_blob', None) or getattr(blob, 'get', None)
-        if getter is None:
-            raise RuntimeError('Installed vercel-blob SDK does not expose get_blob/get.')
-
         try:
-            result = getter(pathname, access='private')
-            if asyncio.iscoroutine(result):
-                result = asyncio.run(result)
+            result = self._blob().get_blob(self._pathname(key), access='private')
         except Exception as err:
             err_text = str(err).lower()
             if 'not found' in err_text or '404' in err_text or 'blobnotfound' in err_text:
@@ -73,28 +61,18 @@ class VercelBlobStateStore:
             body = result.read()
         if body is None:
             return None
-        if isinstance(body, bytes):
-            return json.loads(body.decode('utf-8'))
-        return json.loads(str(body))
+        return json.loads(body.decode('utf-8') if isinstance(body, bytes) else str(body))
 
     def set_json(self, key: str, value: Dict[str, Any]) -> None:
-        blob = self._get_blob_module()
-        pathname = self._pathname(key)
-        putter = getattr(blob, 'put_blob', None) or getattr(blob, 'put', None)
-        if putter is None:
-            raise RuntimeError('Installed vercel-blob SDK does not expose put_blob/put.')
-
         body = json.dumps(value, indent=2).encode('utf-8')
-        result = putter(
-            pathname,
+        self._blob().put_blob(
+            self._pathname(key),
             body,
             access='private',
             allow_overwrite=True,
             add_random_suffix=False,
             content_type='application/json',
         )
-        if asyncio.iscoroutine(result):
-            asyncio.run(result)
 
 
 class LocalFileStateStore:
@@ -114,8 +92,7 @@ class LocalFileStateStore:
         path = self._path(key)
         if not path.is_file():
             return None
-        with path.open('r', encoding='utf-8') as f:
-            return json.load(f)
+        return json.loads(path.read_text(encoding='utf-8'))
 
     def set_json(self, key: str, value: Dict[str, Any]) -> None:
         path = self._path(key)

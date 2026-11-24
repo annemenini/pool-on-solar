@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import time
 from typing import Any, Dict, Optional
-from urllib.parse import parse_qs, urlencode, urlparse
+from urllib.parse import urlencode
 
 import httpx
 
@@ -12,6 +12,7 @@ from pool_on_solar.tesla_fleet import (
     DEFAULT_AUTH_BASE_URL,
     DEFAULT_SCOPES,
     DEFAULT_TOKEN_URL,
+    select_energy_site_id,
 )
 
 DEFAULT_AUTH_URL = f'{DEFAULT_AUTH_BASE_URL}/oauth2/v3/authorize'
@@ -34,28 +35,6 @@ def build_authorization_url(
         'state': state,
     }
     return f'{auth_url}?{urlencode(params)}'
-
-
-def extract_code_from_input(raw_input: str, expected_state: Optional[str] = None) -> str:
-    """Extracts an authorization code from either a full redirect URL or a bare code."""
-    cleaned = raw_input.strip()
-    if not cleaned:
-        raise ValueError('Empty authorization response.')
-
-    if '://' in cleaned or '?' in cleaned:
-        parsed = urlparse(cleaned)
-        query = parse_qs(parsed.query)
-        if 'error' in query:
-            err = query['error'][0]
-            desc = query.get('error_description', [''])[0]
-            raise RuntimeError(f'Tesla authorization failed: {err} {desc}'.strip())
-        if expected_state and 'state' in query and query['state'][0] != expected_state:
-            raise ValueError('OAuth state mismatch in redirect URL. Please retry.')
-        if 'code' not in query or not query['code'][0]:
-            raise ValueError('Redirect URL does not contain a "code" query parameter.')
-        return query['code'][0]
-
-    return cleaned
 
 
 def register_partner_domain(
@@ -149,22 +128,4 @@ def discover_energy_site_id(
     if resp.status_code >= 400:
         return None
     products = resp.json().get('response')
-    if not isinstance(products, list):
-        return None
-
-    battery_sites = [
-        p.get('energy_site_id')
-        for p in products
-        if isinstance(p, dict)
-        and p.get('resource_type') == 'battery'
-        and p.get('energy_site_id') is not None
-    ]
-    if battery_sites:
-        return str(battery_sites[0])
-
-    any_energy_sites = [
-        p.get('energy_site_id')
-        for p in products
-        if isinstance(p, dict) and p.get('energy_site_id') is not None
-    ]
-    return str(any_energy_sites[0]) if any_energy_sites else None
+    return select_energy_site_id(products) if isinstance(products, list) else None

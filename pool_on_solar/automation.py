@@ -4,22 +4,24 @@ from __future__ import annotations
 
 import datetime
 from typing import Any, Dict, List, Optional
+from zoneinfo import ZoneInfo
 
 from iaqualink.client import AqualinkClient
 from iaqualink.device import AqualinkDevice
-import pytz
 from suntime import Sun
 
-from pool_on_solar.cache import AppCache
+from pool_on_solar.cache import (
+    AUTOMATION_LAST_RUN_CACHE_KEY,
+    DASHBOARD_STATUS_TAG,
+    AppCache,
+)
 from pool_on_solar.config import AppConfig
 from pool_on_solar.storage import StateStore
 from pool_on_solar.tesla_fleet import TeslaFleetClient
 
 STALE_RUN_THRESHOLD_SECONDS = 15 * 60
 AUTOMATION_EXEC_IDEMPOTENCY_TTL_SECONDS = 60 * 60
-AUTOMATION_LAST_RUN_CACHE_KEY = 'automation:last-run'
 AUTOMATION_LAST_RUN_TTL_SECONDS = 24 * 60 * 60
-DASHBOARD_STATUS_TAG = 'dashboard-status'
 
 
 async def try_switch_device(
@@ -92,8 +94,7 @@ class Controller:
         return {'excess_power': excess_power, 'battery_percentage': battery_percentage}
 
     def convert_to_local_time(self, dt: datetime.datetime) -> datetime.datetime:
-        local_tz = pytz.timezone(self._config.location.timezone)
-        return dt.astimezone(local_tz)
+        return dt.astimezone(ZoneInfo(self._config.location.timezone))
 
     def _now_local(self) -> datetime.datetime:
         return self.convert_to_local_time(datetime.datetime.now(datetime.timezone.utc))

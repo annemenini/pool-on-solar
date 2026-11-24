@@ -61,29 +61,6 @@ def _install_optional_stubs() -> None:
             sys.modules['iaqualink.client'] = iaq_client_mod
             sys.modules['iaqualink.device'] = iaq_dev_mod
 
-    if 'pytz' not in sys.modules:
-        try:
-            import pytz  # noqa: F401
-        except ImportError:
-            pytz_mod = types.ModuleType('pytz')
-            pytz_mod.UTC = datetime.timezone.utc
-
-            class _SimpleTz(datetime.tzinfo):
-                def utcoffset(self, dt):
-                    return datetime.timedelta(0)
-
-                def dst(self, dt):
-                    return datetime.timedelta(0)
-
-                def tzname(self, dt):
-                    return 'UTC'
-
-                def localize(self, dt):
-                    return dt.replace(tzinfo=self)
-
-            pytz_mod.timezone = lambda _name: _SimpleTz()
-            sys.modules['pytz'] = pytz_mod
-
     if 'suntime' not in sys.modules:
         try:
             import suntime  # noqa: F401
@@ -145,13 +122,13 @@ from pool_on_solar.automation import (  # noqa: E402
     run_scheduled_automation,
 )
 from pool_on_solar.cache import (  # noqa: E402
+    DASHBOARD_SNAPSHOT_CACHE_KEY,
     MemoryCache,
     VercelRuntimeCache,
     create_app_cache,
 )
 from pool_on_solar.config import AppConfig, load_config, parse_bool_env  # noqa: E402
 from pool_on_solar.dashboard import (  # noqa: E402
-    DASHBOARD_SNAPSHOT_CACHE_KEY,
     StatusCollector,
     render_dashboard_html,
 )
@@ -159,7 +136,6 @@ from pool_on_solar.oauth import (  # noqa: E402
     build_authorization_url,
     discover_energy_site_id,
     exchange_code_for_tokens,
-    extract_code_from_input,
     register_partner_domain,
 )
 from pool_on_solar.storage import (  # noqa: E402
@@ -237,9 +213,10 @@ class VercelConfigAndStorageTests(unittest.TestCase):
             vcfg['schedules']['pool-on-solar'],
             {'root': '.', 'entrypoint': 'jobs'},
         )
-        for rewrite in vcfg['rewrites']:
-            self.assertNotIn('jobs', rewrite['source'])
-            self.assertNotIn('jobs', str(rewrite['destination']))
+        self.assertEqual(
+            vcfg['rewrites'],
+            [{'source': '/(.*)', 'destination': '/api/web'}],
+        )
 
     def test_all_python_files_compile_without_syntax_errors(self):
         for path in sorted(REPO_ROOT.rglob('*.py')):
@@ -268,7 +245,7 @@ class VercelConfigAndStorageTests(unittest.TestCase):
             self.assertEqual(cfg.tesla.client_id, 'cid-test')
             self.assertEqual(cfg.tesla.energy_site_id, '2252243631420713')
             self.assertEqual(cfg.iaqualink.pool.devices, ['pool_pump', 'aux_1'])
-            self.assertEqual(cfg.location.timezone, 'US/Pacific')
+            self.assertEqual(cfg.location.timezone, 'America/Los_Angeles')
 
     def test_local_state_store_roundtrip_and_permissions(self):
         with tempfile.TemporaryDirectory() as tmpdir:
@@ -287,14 +264,14 @@ class VercelConfigAndStorageTests(unittest.TestCase):
 
         class _FakeBlobModule:
             @staticmethod
-            async def put_blob(pathname, body, **kwargs):
+            def put_blob(pathname, body, **kwargs):
                 assert kwargs['access'] == 'private'
                 assert kwargs['allow_overwrite'] is True
                 assert kwargs['add_random_suffix'] is False
                 stored[pathname] = body
 
             @staticmethod
-            async def get_blob(pathname, **kwargs):
+            def get_blob(pathname, **kwargs):
                 assert kwargs['access'] == 'private'
                 if pathname not in stored:
                     raise RuntimeError('BlobNotFoundError: not found')
@@ -418,10 +395,6 @@ class TeslaFleetAndAutomationTests(unittest.TestCase):
             state='s123',
         )
         self.assertIn('energy_device_data', url)
-        self.assertEqual(
-            extract_code_from_input('https://hilo.steren.fr/oauth/callback?code=NA_1&state=s123', 's123'),
-            'NA_1',
-        )
         fake_http = _FakeHttpClient([
             _FakeResponse(200, {'access_token': 'p-tok'}),
             _FakeResponse(200, {'response': {'domain': 'hilo.steren.fr'}}),

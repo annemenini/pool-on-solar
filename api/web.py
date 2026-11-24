@@ -2,23 +2,25 @@
 
 from __future__ import annotations
 
+from dataclasses import dataclass
+from functools import lru_cache
 from html import escape
 from http import cookies
 from http.server import BaseHTTPRequestHandler
 import json
 import os
-from pathlib import Path
 import secrets
 from typing import Any, Callable, Dict, Optional
 from urllib.parse import parse_qs, urlparse
 
-from pool_on_solar.cache import AppCache, create_app_cache
-from pool_on_solar.config import AppConfig, load_config, parse_bool_env
-from pool_on_solar.dashboard import (
+from pool_on_solar.cache import (
     DASHBOARD_STATUS_TAG,
-    StatusCollector,
-    render_dashboard_html,
+    TESLA_SITE_TAG,
+    AppCache,
+    create_app_cache,
 )
+from pool_on_solar.config import AppConfig, load_config, parse_bool_env
+from pool_on_solar.dashboard import StatusCollector, render_dashboard_html
 from pool_on_solar.oauth import (
     build_authorization_url,
     discover_energy_site_id,
@@ -36,34 +38,31 @@ STATE_COOKIE_NAME = 'tesla_oauth_state'
 SESSION_COOKIE_NAME = 'pool_dashboard_session'
 WELL_KNOWN_KEY_PATH = '/.well-known/appspecific/com.tesla.3p.public-key.pem'
 
-_SHARED_COLLECTOR: Optional[StatusCollector] = None
-_SHARED_STORE: Optional[StateStore] = None
-_SHARED_CACHE: Optional[AppCache] = None
-_SHARED_CONFIG: Optional[AppConfig] = None
+
+@dataclass(frozen=True)
+class _Runtime:
+    config: AppConfig
+    store: StateStore
+    cache: AppCache
+    collector: StatusCollector
+
+
+@lru_cache(maxsize=1)
+def _default_runtime() -> _Runtime:
+    cfg = load_config()
+    store = create_state_store()
+    cache = create_app_cache()
+    return _Runtime(
+        config=cfg,
+        store=store,
+        cache=cache,
+        collector=StatusCollector(cfg, store, cache=cache),
+    )
 
 
 def load_public_key_pem() -> Optional[str]:
     env_pem = os.getenv('TESLA_PUBLIC_KEY_PEM')
-    if env_pem:
-        return env_pem.replace('\\n', '\n').strip() + '\n'
-
-    key_file = os.getenv('TESLA_PUBLIC_KEY_FILE')
-    if key_file and Path(key_file).is_file():
-        return Path(key_file).read_text(encoding='utf-8').strip() + '\n'
-    return None
-
-
-def _get_runtime() -> tuple[AppConfig, StateStore, StatusCollector, AppCache]:
-    global _SHARED_CONFIG, _SHARED_STORE, _SHARED_COLLECTOR, _SHARED_CACHE
-    if _SHARED_CONFIG is None:
-        _SHARED_CONFIG = load_config()
-    if _SHARED_STORE is None:
-        _SHARED_STORE = create_state_store()
-    if _SHARED_CACHE is None:
-        _SHARED_CACHE = create_app_cache()
-    if _SHARED_COLLECTOR is None:
-        _SHARED_COLLECTOR = StatusCollector(_SHARED_CONFIG, _SHARED_STORE, cache=_SHARED_CACHE)
-    return _SHARED_CONFIG, _SHARED_STORE, _SHARED_COLLECTOR, _SHARED_CACHE
+    return (env_pem.replace('\\n', '\n').strip() + '\n') if env_pem else None
 
 
 def _render_simple_html(title: str, body_html: str) -> bytes:
@@ -103,20 +102,15 @@ def make_web_handler(
     public_key_loader: Callable[[], Optional[str]] = load_public_key_pem,
 ):
     class WebHandler(BaseHTTPRequestHandler):
-        def _deps(self) -> tuple[AppConfig, StateStore, StatusCollector, AppCache]:
-            if (
-                config is not None
-                and state_store is not None
-                and collector is not None
-                and cache is not None
-            ):
-                return config, state_store, collector, cache
-            default_cfg, default_store, default_collector, default_cache = _get_runtime()
-            return (
-                config or default_cfg,
-                state_store or default_store,
-                collector or default_collector,
-                cache or default_cache,
+        def _runtime(self) -> _Runtime:
+            if config and state_store and collector and cache:
+                return _Runtime(config=config, store=state_store, cache=cache, collector=collector)
+            default = _default_runtime()
+            return _Runtime(
+                config=config or default.config,
+                store=state_store or default.store,
+                cache=cache or default.cache,
+                collector=collector or default.collector,
             )
 
         def _request_host(self) -> str:
@@ -130,20 +124,14 @@ def make_web_handler(
             if forwarded:
                 return forwarded.split(',')[0].strip()
             host = self._request_host()
-            if host.startswith('localhost') or host.startswith('127.0.0.1'):
-                return 'http'
-            return 'https'
+            return 'http' if host.startswith(('localhost', '127.0.0.1')) else 'https'
 
         def _is_same_origin(self) -> bool:
             host = self._request_host().lower()
-            origin = self.headers.get('Origin')
-            if origin:
-                origin_host = (urlparse(origin).netloc or '').lower()
-                return bool(origin_host and origin_host == host)
-            referer = self.headers.get('Referer')
-            if referer:
-                ref_host = (urlparse(referer).netloc or '').lower()
-                return bool(ref_host and ref_host == host)
+            for header in ('Origin', 'Referer'):
+                value = self.headers.get(header)
+                if value:
+                    return (urlparse(value).netloc or '').lower() == host
             return True
 
         def _get_cookie(self, name: str) -> Optional[str]:
@@ -154,6 +142,10 @@ def make_web_handler(
             jar.load(raw)
             morsel = jar.get(name)
             return morsel.value if morsel else None
+
+        def _cookie_flags(self, max_age: int) -> str:
+            flags = f'HttpOnly; SameSite=Lax; Path=/; Max-Age={max_age}'
+            return f'{flags}; Secure' if self._request_scheme() == 'https' else flags
 
         def _send_bytes(
             self,
@@ -166,14 +158,36 @@ def make_web_handler(
             self.send_header('Content-Type', content_type)
             self.send_header('Content-Length', str(len(body)))
             self.send_header('Cache-Control', 'no-store')
-            if extra_headers:
-                for key, value in extra_headers.items():
-                    self.send_header(key, value)
+            for key, value in (extra_headers or {}).items():
+                self.send_header(key, value)
             self.end_headers()
             self.wfile.write(body)
 
+        def _send_html(
+            self,
+            status: int,
+            title: str,
+            body_html: str,
+            extra_headers: Optional[Dict[str, str]] = None,
+        ) -> None:
+            self._send_bytes(
+                status,
+                _render_simple_html(title, body_html),
+                'text/html; charset=utf-8',
+                extra_headers=extra_headers,
+            )
+
+        def _redirect(
+            self,
+            location: str,
+            status: int = 303,
+            extra_headers: Optional[Dict[str, str]] = None,
+        ) -> None:
+            headers = {'Location': location, **(extra_headers or {})}
+            self._send_bytes(status, b'', 'text/plain; charset=utf-8', extra_headers=headers)
+
         def _check_access_gate(self, path: str, query: Dict[str, Any]) -> bool:
-            """Optional token gate (DASHBOARD_ACCESS_TOKEN) when not using Vercel Deployment Protection."""
+            """Optional token gate (DASHBOARD_ACCESS_TOKEN) when not using Deployment Protection."""
             expected = os.getenv('DASHBOARD_ACCESS_TOKEN', '')
             if not expected:
                 return True
@@ -184,47 +198,35 @@ def make_web_handler(
 
             query_val = (query.get('token') or [''])[0]
             if query_val and secrets.compare_digest(query_val, expected):
-                flags = 'HttpOnly; SameSite=Lax; Path=/; Max-Age=2592000'
-                if self._request_scheme() == 'https':
-                    flags += '; Secure'
-                self._send_bytes(
-                    303,
-                    b'',
-                    'text/plain; charset=utf-8',
+                self._redirect(
+                    path or '/',
                     extra_headers={
-                        'Location': path or '/',
-                        'Set-Cookie': f'{SESSION_COOKIE_NAME}={expected}; {flags}',
+                        'Set-Cookie': f'{SESSION_COOKIE_NAME}={expected}; {self._cookie_flags(2592000)}'
                     },
                 )
                 return False
 
-            self._send_bytes(
+            self._send_html(
                 401,
-                _render_simple_html(
-                    'Access Restricted',
-                    '<p>Sign in with your access token: append <code>?token=...</code> to the URL.</p>',
-                ),
-                'text/html; charset=utf-8',
+                'Access Restricted',
+                '<p>Sign in with your access token: append <code>?token=...</code> to the URL.</p>',
             )
             return False
 
         def _effective_redirect_uri(self) -> str:
-            override = os.getenv('TESLA_REDIRECT_URI')
-            if override:
-                return override
-            return f'{self._request_scheme()}://{self._request_host()}/oauth/callback'
+            return os.getenv('TESLA_REDIRECT_URI') or (
+                f'{self._request_scheme()}://{self._request_host()}/oauth/callback'
+            )
 
         def _effective_partner_domain(self) -> str:
             override = os.getenv('TESLA_PARTNER_DOMAIN')
             if override:
                 return override.strip().lower()
-            parsed = urlparse(self._effective_redirect_uri())
-            return (parsed.hostname or '').lower()
+            return (urlparse(self._effective_redirect_uri()).hostname or '').lower()
 
         def do_GET(self) -> None:
             parsed = urlparse(self.path)
-            path = parsed.path
-            query = parse_qs(parsed.query)
+            path, query = parsed.path, parse_qs(parsed.query)
 
             if path == WELL_KNOWN_KEY_PATH:
                 pem = public_key_loader()
@@ -245,18 +247,17 @@ def make_web_handler(
             if not self._check_access_gate(path, query):
                 return
 
-            cfg, store, active_collector, active_cache = self._deps()
+            rt = self._runtime()
             oidc_token = self.headers.get('x-vercel-oidc-token')
+            force = (query.get('refresh') or [''])[0].lower() in {'1', 'true', 'yes'}
 
             if path in {'/', '/api/web'}:
-                force = (query.get('refresh') or [''])[0].lower() in {'1', 'true', 'yes'}
-                snapshot = active_collector.get_snapshot(force_refresh=force, oidc_token=oidc_token)
+                snapshot = rt.collector.get_snapshot(force_refresh=force, oidc_token=oidc_token)
                 self._send_bytes(200, render_dashboard_html(snapshot), 'text/html; charset=utf-8')
                 return
 
             if path == '/api/status':
-                force = (query.get('refresh') or [''])[0].lower() in {'1', 'true', 'yes'}
-                snapshot = active_collector.get_snapshot(force_refresh=force, oidc_token=oidc_token)
+                snapshot = rt.collector.get_snapshot(force_refresh=force, oidc_token=oidc_token)
                 self._send_bytes(
                     200,
                     json.dumps(snapshot, indent=2).encode('utf-8'),
@@ -266,32 +267,26 @@ def make_web_handler(
 
             if path in {'/oauth', '/oauth/', '/oauth/login', '/oauth/callback'}:
                 if not parse_bool_env('OAUTH_ENABLED', default=False):
-                    self._send_bytes(
+                    self._send_html(
                         403,
-                        _render_simple_html(
-                            'OAuth Flow Disabled',
-                            '<p>Set <code>OAUTH_ENABLED=true</code> in Vercel environment variables '
-                            'to run interactive Tesla OAuth setup. The public key endpoint remains active.</p>',
-                        ),
-                        'text/html; charset=utf-8',
+                        'OAuth Flow Disabled',
+                        '<p>Set <code>OAUTH_ENABLED=true</code> in Vercel environment variables '
+                        'to run interactive Tesla OAuth setup. The public key endpoint remains active.</p>',
                     )
                     return
                 if path in {'/oauth', '/oauth/'}:
-                    self._handle_oauth_index(cfg, store)
-                    return
-                if path == '/oauth/login':
-                    self._handle_oauth_login(cfg)
-                    return
-                if path == '/oauth/callback':
-                    self._handle_oauth_callback(cfg, store, active_cache, query)
-                    return
+                    self._handle_oauth_index(rt)
+                elif path == '/oauth/login':
+                    self._handle_oauth_login(rt.config)
+                else:
+                    self._handle_oauth_callback(rt, query)
+                return
 
             self._send_bytes(404, b'Not Found\n', 'text/plain; charset=utf-8')
 
         def do_POST(self) -> None:
             parsed = urlparse(self.path)
-            path = parsed.path
-            query = parse_qs(parsed.query)
+            path, query = parsed.path, parse_qs(parsed.query)
 
             if not self._check_access_gate(path, query):
                 return
@@ -300,68 +295,64 @@ def make_web_handler(
                 self._send_bytes(403, b'Cross-origin POST rejected.\n', 'text/plain; charset=utf-8')
                 return
 
-            cfg, _, active_collector, _ = self._deps()
+            rt = self._runtime()
             oidc_token = self.headers.get('x-vercel-oidc-token')
 
             if path in {'/scheduler/pause', '/scheduler/resume'}:
                 action = 'pause' if path == '/scheduler/pause' else 'resume'
                 try:
-                    active_collector.toggle_scheduler(action, oidc_token=oidc_token)
+                    rt.collector.toggle_scheduler(action, oidc_token=oidc_token)
                 except Exception as err:
-                    self._send_bytes(
+                    self._send_html(
                         502,
-                        _render_simple_html(
-                            f'Failed to {action} schedule',
-                            f'<pre>{escape(str(err))}</pre><p><a href="/">Back</a></p>',
-                        ),
-                        'text/html; charset=utf-8',
+                        f'Failed to {action} schedule',
+                        f'<pre>{escape(str(err))}</pre><p><a href="/">Back</a></p>',
                     )
                     return
-                self._send_bytes(
-                    303,
-                    b'',
-                    'text/plain; charset=utf-8',
-                    extra_headers={'Location': '/'},
-                )
+                self._redirect('/')
                 return
 
             if path == '/oauth/register':
                 if not parse_bool_env('OAUTH_ENABLED', default=False):
-                    self._send_bytes(
+                    self._send_html(
                         403,
-                        _render_simple_html(
-                            'OAuth Flow Disabled',
-                            '<p>Set <code>OAUTH_ENABLED=true</code> first.</p>',
-                        ),
-                        'text/html; charset=utf-8',
+                        'OAuth Flow Disabled',
+                        '<p>Set <code>OAUTH_ENABLED=true</code> first.</p>',
                     )
                     return
-                self._handle_oauth_register(cfg)
+                self._handle_oauth_register(rt.config)
                 return
 
             self._send_bytes(404, b'Not Found\n', 'text/plain; charset=utf-8')
 
-        def _handle_oauth_index(self, cfg: AppConfig, store: StateStore) -> None:
-            redirect_uri = self._effective_redirect_uri()
-            domain = self._effective_partner_domain()
-            key_ok = bool(public_key_loader())
+        def _require_tesla_credentials(self, cfg: AppConfig) -> bool:
+            if cfg.tesla.client_id and cfg.tesla.client_secret:
+                return True
+            self._send_html(
+                500,
+                'Missing Configuration',
+                '<p><code>TESLA_CLIENT_ID</code> and <code>TESLA_CLIENT_SECRET</code> must be set.</p>',
+            )
+            return False
+
+        def _handle_oauth_index(self, rt: _Runtime) -> None:
             key_status = (
                 '<span class="ok">Configured</span>'
-                if key_ok
+                if public_key_loader()
                 else '<span class="warn">Missing (set TESLA_PUBLIC_KEY_PEM)</span>'
             )
             creds_status = (
                 '<span class="ok">Configured</span>'
-                if cfg.tesla.client_id and cfg.tesla.client_secret
+                if rt.config.tesla.client_id and rt.config.tesla.client_secret
                 else '<span class="warn">Missing TESLA_CLIENT_ID / TESLA_CLIENT_SECRET</span>'
             )
             body = (
                 '<div class="box">'
-                f'<p><strong>Partner Domain:</strong> <code>{escape(domain)}</code></p>'
-                f'<p><strong>Redirect URI:</strong> <code>{escape(redirect_uri)}</code></p>'
+                f'<p><strong>Partner Domain:</strong> <code>{escape(self._effective_partner_domain())}</code></p>'
+                f'<p><strong>Redirect URI:</strong> <code>{escape(self._effective_redirect_uri())}</code></p>'
                 f'<p><strong>Public Key URL:</strong> <a href="{WELL_KNOWN_KEY_PATH}"><code>{WELL_KNOWN_KEY_PATH}</code></a> ({key_status})</p>'
                 f'<p><strong>Tesla Client Credentials:</strong> {creds_status}</p>'
-                f'<p><strong>Storage Backend:</strong> <code>{escape(store.backend_name)}</code></p>'
+                f'<p><strong>Storage Backend:</strong> <code>{escape(rt.store.backend_name)}</code></p>'
                 '</div>'
                 '<div class="box">'
                 '<form method="post" action="/oauth/register" style="display:inline">'
@@ -369,26 +360,13 @@ def make_web_handler(
                 '<a class="btn" href="/oauth/login">2. Login with Tesla</a>'
                 '</div>'
             )
-            self._send_bytes(
-                200,
-                _render_simple_html('Tesla Fleet API OAuth Setup', body),
-                'text/html; charset=utf-8',
-            )
+            self._send_html(200, 'Tesla Fleet API OAuth Setup', body)
 
         def _handle_oauth_register(self, cfg: AppConfig) -> None:
-            if not cfg.tesla.client_id or not cfg.tesla.client_secret:
-                self._send_bytes(
-                    500,
-                    _render_simple_html(
-                        'Missing Configuration',
-                        '<p><code>TESLA_CLIENT_ID</code> and <code>TESLA_CLIENT_SECRET</code> must be set.</p>',
-                    ),
-                    'text/html; charset=utf-8',
-                )
+            if not self._require_tesla_credentials(cfg):
                 return
 
             domain = self._effective_partner_domain()
-            scopes = os.getenv('TESLA_SCOPES', DEFAULT_SCOPES)
             try:
                 with http_client_factory() as http:
                     result = register_partner_domain(
@@ -397,41 +375,27 @@ def make_web_handler(
                         client_secret=cfg.tesla.client_secret,
                         domain=domain,
                         api_base_url=cfg.tesla.api_base_url,
-                        scopes=scopes,
+                        scopes=os.getenv('TESLA_SCOPES', DEFAULT_SCOPES),
                     )
             except Exception as err:
-                self._send_bytes(
+                self._send_html(
                     502,
-                    _render_simple_html(
-                        'Partner Registration Failed',
-                        f'<p>Failed to register <code>{escape(domain)}</code>:</p><pre>{escape(str(err))}</pre>'
-                        '<p><a href="/oauth">Back</a></p>',
-                    ),
-                    'text/html; charset=utf-8',
+                    'Partner Registration Failed',
+                    f'<p>Failed to register <code>{escape(domain)}</code>:</p><pre>{escape(str(err))}</pre>'
+                    '<p><a href="/oauth">Back</a></p>',
                 )
                 return
 
-            self._send_bytes(
+            self._send_html(
                 200,
-                _render_simple_html(
-                    'Partner Domain Registered',
-                    f'<p class="ok">Registered <code>{escape(domain)}</code> with Tesla Fleet API.</p>'
-                    f'<pre>{escape(json.dumps(result, indent=2))}</pre>'
-                    '<p><a class="btn" href="/oauth/login">Continue to Tesla Login</a> <a href="/oauth">Back</a></p>',
-                ),
-                'text/html; charset=utf-8',
+                'Partner Domain Registered',
+                f'<p class="ok">Registered <code>{escape(domain)}</code> with Tesla Fleet API.</p>'
+                f'<pre>{escape(json.dumps(result, indent=2))}</pre>'
+                '<p><a class="btn" href="/oauth/login">Continue to Tesla Login</a> <a href="/oauth">Back</a></p>',
             )
 
         def _handle_oauth_login(self, cfg: AppConfig) -> None:
-            if not cfg.tesla.client_id or not cfg.tesla.client_secret:
-                self._send_bytes(
-                    500,
-                    _render_simple_html(
-                        'Missing Configuration',
-                        '<p><code>TESLA_CLIENT_ID</code> and <code>TESLA_CLIENT_SECRET</code> must be set.</p>',
-                    ),
-                    'text/html; charset=utf-8',
-                )
+            if not self._require_tesla_credentials(cfg):
                 return
 
             state = secrets.token_urlsafe(24)
@@ -441,37 +405,20 @@ def make_web_handler(
                 state=state,
                 scopes=os.getenv('TESLA_SCOPES', DEFAULT_SCOPES),
             )
-            cookie_flags = 'HttpOnly; SameSite=Lax; Path=/; Max-Age=600'
-            if self._request_scheme() == 'https':
-                cookie_flags += '; Secure'
-
-            self._send_bytes(
-                302,
-                b'',
-                'text/plain; charset=utf-8',
-                extra_headers={
-                    'Location': auth_url,
-                    'Set-Cookie': f'{STATE_COOKIE_NAME}={state}; {cookie_flags}',
-                },
+            self._redirect(
+                auth_url,
+                status=302,
+                extra_headers={'Set-Cookie': f'{STATE_COOKIE_NAME}={state}; {self._cookie_flags(600)}'},
             )
 
-        def _handle_oauth_callback(
-            self,
-            cfg: AppConfig,
-            store: StateStore,
-            active_cache: AppCache,
-            query: Dict[str, Any],
-        ) -> None:
+        def _handle_oauth_callback(self, rt: _Runtime, query: Dict[str, Any]) -> None:
             if 'error' in query:
                 err = query['error'][0]
                 desc = (query.get('error_description') or [''])[0]
-                self._send_bytes(
+                self._send_html(
                     400,
-                    _render_simple_html(
-                        'Tesla Authorization Error',
-                        f'<p>Tesla returned an error: <code>{escape(err)}</code> {escape(desc)}</p>',
-                    ),
-                    'text/html; charset=utf-8',
+                    'Tesla Authorization Error',
+                    f'<p>Tesla returned an error: <code>{escape(err)}</code> {escape(desc)}</p>',
                 )
                 return
 
@@ -480,27 +427,22 @@ def make_web_handler(
             expected_state = self._get_cookie(STATE_COOKIE_NAME)
 
             if not code:
-                self._send_bytes(
+                self._send_html(
                     400,
-                    _render_simple_html(
-                        'Missing Code',
-                        '<p>Callback URL did not contain a <code>code</code> parameter.</p>',
-                    ),
-                    'text/html; charset=utf-8',
+                    'Missing Code',
+                    '<p>Callback URL did not contain a <code>code</code> parameter.</p>',
                 )
                 return
             if not expected_state or not secrets.compare_digest(returned_state, expected_state):
-                self._send_bytes(
+                self._send_html(
                     400,
-                    _render_simple_html(
-                        'Invalid State',
-                        '<p>OAuth <code>state</code> cookie missing or mismatched. '
-                        'Please <a href="/oauth/login">start the login flow again</a>.</p>',
-                    ),
-                    'text/html; charset=utf-8',
+                    'Invalid State',
+                    '<p>OAuth <code>state</code> cookie missing or mismatched. '
+                    'Please <a href="/oauth/login">start the login flow again</a>.</p>',
                 )
                 return
 
+            cfg = rt.config
             try:
                 with http_client_factory() as http:
                     token_data = exchange_code_for_tokens(
@@ -518,27 +460,21 @@ def make_web_handler(
                         api_base_url=cfg.tesla.api_base_url,
                     )
             except Exception as err:
-                self._send_bytes(
+                self._send_html(
                     502,
-                    _render_simple_html(
-                        'Token Exchange Failed',
-                        f'<p>Could not exchange authorization code with Tesla:</p><pre>{escape(str(err))}</pre>',
-                    ),
-                    'text/html; charset=utf-8',
+                    'Token Exchange Failed',
+                    f'<p>Could not exchange authorization code with Tesla:</p><pre>{escape(str(err))}</pre>',
                 )
                 return
 
             try:
-                store.set_json(TOKEN_STATE_KEY, token_data)
-                active_cache.expire_tag([DASHBOARD_STATUS_TAG, 'tesla-site'])
+                rt.store.set_json(TOKEN_STATE_KEY, token_data)
+                rt.cache.expire_tag([DASHBOARD_STATUS_TAG, TESLA_SITE_TAG])
             except Exception as err:
-                self._send_bytes(
+                self._send_html(
                     500,
-                    _render_simple_html(
-                        'Failed to Persist Tokens',
-                        f'<p>Tokens were received from Tesla, but could not be saved:</p><pre>{escape(str(err))}</pre>',
-                    ),
-                    'text/html; charset=utf-8',
+                    'Failed to Persist Tokens',
+                    f'<p>Tokens were received from Tesla, but could not be saved:</p><pre>{escape(str(err))}</pre>',
                 )
                 return
 
@@ -547,20 +483,15 @@ def make_web_handler(
                 if energy_site_id
                 else ''
             )
-            self._send_bytes(
+            self._send_html(
                 200,
-                _render_simple_html(
-                    'Tesla Authentication Complete',
-                    f'<p class="ok">OAuth tokens saved to <code>{escape(store.backend_name)}</code>.</p>'
-                    f'{site_html}'
-                    '<p>Set <code>OAUTH_ENABLED=false</code> in Vercel project settings '
-                    'so only the dashboard and public key endpoint remain active.</p>'
-                    '<p><a class="btn" href="/">Open Dashboard</a></p>',
-                ),
-                'text/html; charset=utf-8',
-                extra_headers={
-                    'Set-Cookie': f'{STATE_COOKIE_NAME}=; HttpOnly; SameSite=Lax; Path=/; Max-Age=0'
-                },
+                'Tesla Authentication Complete',
+                f'<p class="ok">OAuth tokens saved to <code>{escape(rt.store.backend_name)}</code>.</p>'
+                f'{site_html}'
+                '<p>Set <code>OAUTH_ENABLED=false</code> in Vercel project settings '
+                'so only the dashboard and public key endpoint remain active.</p>'
+                '<p><a class="btn" href="/">Open Dashboard</a></p>',
+                extra_headers={'Set-Cookie': f'{STATE_COOKIE_NAME}=; {self._cookie_flags(0)}'},
             )
 
     return WebHandler

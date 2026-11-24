@@ -66,7 +66,6 @@ vercel deploy --prod
    vercel env rm OAUTH_ENABLED production
    vercel deploy --prod
    ```
-   *(An interactive local CLI is also available in [scripts/tesla_auth.py](scripts/tesla_auth.py).)*
 
 ### 4. Configure BigQuery credentials for daily analysis
 

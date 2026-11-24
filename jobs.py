@@ -4,8 +4,6 @@ from __future__ import annotations
 
 from datetime import timedelta
 import json
-import os
-from typing import Optional
 
 from vercel.schedules import ScheduleMetadata, schedule
 
@@ -14,18 +12,6 @@ from pool_on_solar.automation import run_scheduled_automation
 from pool_on_solar.cache import create_app_cache
 from pool_on_solar.config import load_config
 from pool_on_solar.storage import create_state_store
-
-
-def _resolve_oidc_token() -> Optional[str]:
-    try:
-        from vercel.oidc import get_vercel_oidc_token
-
-        token = get_vercel_oidc_token()
-        if token:
-            return token
-    except Exception:
-        pass
-    return os.getenv('VERCEL_OIDC_TOKEN')
 
 
 @schedule(
@@ -40,15 +26,12 @@ async def automation_job(metadata: ScheduleMetadata) -> None:
         f'Starting scheduled {metadata.name} run '
         f'(executionId={metadata.execution_id}, scheduledAt={metadata.scheduled_at.isoformat()})'
     )
-    config = load_config()
-    state_store = create_state_store()
-    cache = create_app_cache()
     result = await run_scheduled_automation(
-        config=config,
-        state_store=state_store,
+        config=load_config(),
+        state_store=create_state_store(),
         execution_id=metadata.execution_id,
         scheduled_at=metadata.scheduled_at.isoformat(),
-        cache=cache,
+        cache=create_app_cache(),
     )
     print(json.dumps(result))
 
@@ -65,14 +48,10 @@ def analysis_job(metadata: ScheduleMetadata) -> None:
         f'Starting scheduled {metadata.name} BigQuery sync '
         f'(executionId={metadata.execution_id}, scheduledAt={metadata.scheduled_at.isoformat()})'
     )
-    config = load_config()
-    state_store = create_state_store()
-    cache = create_app_cache()
     result = run_daily_analysis(
-        config=config,
-        state_store=state_store,
+        config=load_config(),
+        state_store=create_state_store(),
         execution_id=metadata.execution_id,
-        oidc_token=_resolve_oidc_token(),
-        cache=cache,
+        cache=create_app_cache(),
     )
     print(json.dumps(result))

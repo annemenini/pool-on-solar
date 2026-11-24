@@ -14,31 +14,7 @@
   },
   "rewrites": [
     {
-      "source": "/",
-      "destination": "/api/web"
-    },
-    {
-      "source": "/healthz",
-      "destination": "/api/web"
-    },
-    {
-      "source": "/api/status",
-      "destination": "/api/web"
-    },
-    {
-      "source": "/scheduler/(.*)",
-      "destination": "/api/web"
-    },
-    {
-      "source": "/oauth",
-      "destination": "/api/web"
-    },
-    {
-      "source": "/oauth/(.*)",
-      "destination": "/api/web"
-    },
-    {
-      "source": "/.well-known/appspecific/com.tesla.3p.public-key.pem",
+      "source": "/(.*)",
       "destination": "/api/web"
     }
   ]
